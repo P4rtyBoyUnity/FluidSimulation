@@ -12,10 +12,10 @@ public class TestWaves : MonoBehaviour, IConvertGameObjectToEntity
     public int   arraySize = 20;
 
     [SerializeField] private Mesh mesh;
-    [SerializeField] private Material material;
+    [SerializeField] private Material material = null;
     [SerializeField] private Material obstacleMaterial;
 
-    [SerializeField] private Mesh meshToDeform;
+    [SerializeField] private Mesh meshToDeform = null;
 
     NativeArray<Entity> entityArray;
     public EntityManager manager;

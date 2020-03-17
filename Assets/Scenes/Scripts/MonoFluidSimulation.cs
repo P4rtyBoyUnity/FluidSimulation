@@ -8,8 +8,6 @@ using Unity.Entities;
 // Rubber ducky - doit flotter comme du monde avec physique
 // objet qui coule/semi coule avec déplacement de liquide
 // Test limits bottom avec array
-// Better plane resolution, building my own plane
-// system auto qui detected profondeur + largeur
 
 [RequireComponent(typeof(MeshFilter))]
 public class MonoFluidSimulation : MonoBehaviour
@@ -188,7 +186,11 @@ public class MonoFluidSimulation : MonoBehaviour
                 {
                     float Ratio = 1.0f - floatingObjects[i].transform.position.y / y;
                     if (Ratio > 0.0f)
-                        rigidBody.AddForce(normal * Physics.gravity.magnitude * (0.25f + Ratio * 0.3f), ForceMode.Force);
+                    {
+                        rigidBody.AddForce(normal * Physics.gravity.magnitude * (0.25f + Ratio * 0.25f), ForceMode.Force);
+                        if (rigidBody.velocity.y < 0.0f)
+                            rigidBody.velocity = rigidBody.velocity * 0.98f;
+                    }
                 }
                 /*
                 objectsSpeed[i] = (objectsSpeed[i] + normal) * 0.95f;
