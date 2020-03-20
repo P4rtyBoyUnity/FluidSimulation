@@ -250,7 +250,7 @@ public class MonoFluidSimulation : MonoBehaviour
     {
         float wx1, wz1;
         int xi = GetArrayIndexFromXPos(x, out wx1);
-        int zi = GetArrayIndexFromXPos(z, out wz1);
+        int zi = GetArrayIndexFromZPos(z, out wz1);
         float wx2 = (1.0f - wx1);
         float wz2 = (1.0f - wz1);
 

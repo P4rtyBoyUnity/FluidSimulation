@@ -2,11 +2,21 @@
 using System.Collections.Generic;
 using UnityEngine;
 
-// Contour is adjusted in X & Z, but not UVs
-// Contours extremes X (new raycast for X vertexs)
-// Jupette
-// objects detection & management
-// Config pour fixer la shape initale
+/*
+    - Water level can change if immerged object (check for places where we assume water level)
+        - we must also change bounding box
+    - manage many types of objects shape (EvaluateObjectVolume...)
+    - Improved objects physics
+        - Manage splash
+            - Wave
+            - Objects slowdown
+    - Consider object mass & volume for floating
+    - Skirt
+    - Initialshape config 
+        - use a separate script for evaluating surface?
+    - Create a frixed grid for inital config? (not good for parralel compute)
+*/
+    
 
 public class PlaneCreation : MonoBehaviour
 {
@@ -44,6 +54,18 @@ public class PlaneCreation : MonoBehaviour
 
     private Mesh        deformingMesh;
     private BoxCollider collider;
+
+    // Floating objects
+    class PhysicObject
+    {
+        public GameObject   gao;
+        public Vector3      massCenterDelta;
+        public float        volume;
+
+        // updated every frame
+        public float        submergedVolume;            
+    }
+    private List<PhysicObject> physicObjects    = new List<PhysicObject>();
 
     // Start is called before the first frame update
     void Start()
@@ -94,9 +116,10 @@ public class PlaneCreation : MonoBehaviour
 
         CreateSurface();
 
+        // Compute volume
         totalVolume = ComputeVolume();
 
-        vertices[20].y = 2.0f;
+        //vertices[20].y = 2.0f;
     }
 
     // Update is called once per frame
@@ -109,7 +132,7 @@ public class PlaneCreation : MonoBehaviour
             AdvectionPhase();
         }
 
-        //UpdateFloatingObjects();
+        UpdateFloatingObjects();
 
         if (Input.GetMouseButton(0))
         {
@@ -133,10 +156,22 @@ public class PlaneCreation : MonoBehaviour
         deformingMesh.RecalculateNormals();
     }
 
+    private void OnTriggerEnter(Collider other)
+    {
+        Debug.Log("Trigger Enter! " + other.gameObject.name);
+        AddNewGameObject(other.gameObject);        
+    }
+
+    private void OnTriggerExit(Collider other)
+    {
+        Debug.Log("Trigger Exit! " + other.gameObject.name);
+    }
+
     bool CastRay(Ray ray, float maxDistance, out RaycastHit hit)
     {
         if (Physics.Raycast(ray, out hit, maxDistance))
         {
+            //////////// DEBUG            
             /*
             Debug.Log("Hit = (" + hit.point.x + ", " + hit.point.z + ")");
             GameObject cube = GameObject.CreatePrimitive(PrimitiveType.Cube);
@@ -144,10 +179,96 @@ public class PlaneCreation : MonoBehaviour
             //cube.transform.localScale = cube.transform.localScale * 0.05f;
             cube.transform.localScale = new Vector3(Mathf.Max(Mathf.Abs(hit.point.x - ray.origin.x), 0.05f), Mathf.Max(Mathf.Abs(hit.point.y - ray.origin.y), 0.05f), Mathf.Max(Mathf.Abs(hit.point.z - ray.origin.z), 0.05f));
             */
+            /////////
+            
             return true;
         }
 
         return false;
+    }
+
+    void UpdateFloatingObjects()
+    {
+        for (int i = 0; i < physicObjects.Count; i++)
+        {
+            // PARAMS FOR OBJECTS
+            // How much they are in the water
+            // How fast they rotate
+            float y;
+            Vector3 normal = GetYNormal(physicObjects[i].gao.transform.position.x, physicObjects[i].gao.transform.position.z, out y);
+
+            var rigidBody = physicObjects[i].gao.GetComponent<Rigidbody>();
+            if (rigidBody)
+            {
+                /*
+                rigidBody.isKinematic = true;                
+                physicObjects[i].transform.position = new Vector3(physicObjects[i].transform.position.x, y, physicObjects[i].transform.position.z);
+                physicObjects[i].transform.rotation = Quaternion.FromToRotation(Vector3.up, normal);
+                */
+
+                
+                if (y > 0.0f)
+                {
+                    float mv = physicObjects[i].volume / rigidBody.mass;
+
+                    float height = 0.0f;
+                    var objCollider = physicObjects[i].gao.GetComponent<Collider>();
+                    if (objCollider)
+                        height = objCollider.bounds.size.y;
+
+                    Debug.Log("Mass=" + rigidBody.mass + ", volume=" + physicObjects[i].volume + ", mv=" + mv + ", height = " + height);
+
+                    float PercentageInFluid = 1.0f - (physicObjects[i].gao.transform.position.y - y + (height / 2.0f)) / height;
+                    float Ratio = 1.0f - physicObjects[i].gao.transform.position.y / y;
+
+                    Debug.Log("pos = " + physicObjects[i].gao.transform.position.y + ", y=" + y + ", Ratio = " + Ratio + ", Height=" + PercentageInFluid);
+
+                    // compute mass in fluid 
+                    float massInsideFluid = PercentageInFluid * physicObjects[i].volume;  //1.0 = liquid vm
+                    float massOutsideFluid = (1.0f - PercentageInFluid) * rigidBody.mass;
+                    float archimedRatio = massInsideFluid / (massInsideFluid + massOutsideFluid);
+
+                    Debug.Log("Mass in fluid=" + massInsideFluid + ", Mass outside fluid= " + massOutsideFluid + ", ArchiRatio=" + archimedRatio);
+
+                    // Update submerged volume
+                    float newSubmergedVolume = PercentageInFluid * physicObjects[i].volume;
+                    float deltaSubmergedVolume = newSubmergedVolume - physicObjects[i].submergedVolume;
+                    physicObjects[i].submergedVolume = newSubmergedVolume;
+
+                    // submerge volume effect
+                    int index = GetArrayIndexFromPos(physicObjects[i].gao.transform.position);
+                    if (index >= 0)
+                        speedY[index] += deltaSubmergedVolume * 2.0f;
+
+                    rigidBody.AddForce((0.2f * archimedRatio * mv * normal * Physics.gravity.magnitude), ForceMode.Force);
+                    if (rigidBody.velocity.y < 0.0f)
+                        rigidBody.velocity = rigidBody.velocity * 0.98f;
+
+                    /*
+                    if (Ratio > 0.0f)
+                    {
+                        rigidBody.AddForce(mv * normal * Physics.gravity.magnitude * (0.25f + Ratio * 0.25f), ForceMode.Force);
+                        if (rigidBody.velocity.y < 0.0f)
+                            rigidBody.velocity = rigidBody.velocity * 0.98f;
+                    }
+                    */
+                }
+
+                /*
+                objectsSpeed[i] = (objectsSpeed[i] + normal) * 0.95f;
+                Vector3 Dest = floatingObjects[i].transform.position + objectsSpeed[i] * Time.deltaTime;
+                Dest.y = y;
+                floatingObjects[i].transform.position = Vector3.Lerp(floatingObjects[i].transform.position, Dest, 0.3f);
+                floatingObjects[i].transform.rotation = Quaternion.RotateTowards(floatingObjects[i].transform.rotation, Quaternion.FromToRotation(Vector3.up, normal), 0.3f);
+                */
+
+            }
+            else
+            {
+                physicObjects[i].gao.transform.position = new Vector3(physicObjects[i].gao.transform.position.x, y, physicObjects[i].gao.transform.position.z);
+                physicObjects[i].gao.transform.rotation = Quaternion.FromToRotation(Vector3.up, normal);
+            }
+        }
     }
 
     /// <summary>
@@ -184,15 +305,6 @@ public class PlaneCreation : MonoBehaviour
         maxZArray[LimitListLength - 1] = maxZArray[LimitListLength - 2];
 
         return LimitListLength;
-    }
-
-    int GetVerticeIndex(int x, int z, int defaultVal = -1)
-    {
-        if ((x < 0) || (x >= simStripCount))
-            return defaultVal;
-        if((z < stripToVerticeLocalOfs[x]) || (z >= (stripToVerticeLocalOfs[x] + stripToVerticeCount[x])))
-            return defaultVal;
-        return stripToVerticeGlobalOfs[x] + z - stripToVerticeLocalOfs[x];
     }
 
     void CreateSimData()
@@ -300,7 +412,7 @@ public class PlaneCreation : MonoBehaviour
                 if (index >= 0)
                 {
                     // Set Vertex
-                    vertices[index] = new Vector3((float)x * gridResolution, boundingBoxMax.y - boundingBoxMin.y, (float)z * gridResolution - halfResolution);
+                    vertices[index] = GetVertexLocalPos(x, z);
 
                     // Adjust tight contour
                     vertices[index].z = Mathf.Clamp(vertices[index].z, backLimitList[x] - boundingBoxMin.z, frontLimitList[x] - boundingBoxMin.z);
@@ -314,11 +426,6 @@ public class PlaneCreation : MonoBehaviour
                     sphere.transform.localScale = sphere.transform.localScale * 0.1f;
                     */
                     ///////////////
-
-
-                    // SetUV
-                    uvs[index].x = (float)x / (float)(simStripCount - 1);
-                    uvs[index].y = (float)z / (float)(maxStripSize - 1);
 
                     // Set Triangles
                     int nextXindex = GetVerticeIndex(x + 1, z);
@@ -339,6 +446,26 @@ public class PlaneCreation : MonoBehaviour
             }
         }
 
+        if (useSurfaceAreaDetection)
+            AdjustXContour();
+
+        // computes UVs
+        for (int x = 0; x < simStripCount; x++)
+        {
+            for (int z = 0; z < maxStripSize; z++)
+            {
+                int index = GetVerticeIndex(x, z);
+                if (index >= 0)
+                {
+                    // SetUV
+                    uvs[index].x = vertices[index].x / (float)(simStripCount - 1);
+                    uvs[index].y = vertices[index].z / (float)(maxStripSize - 1);
+                }
+            }
+
+        }
+
+        // Create the mesh!
         MeshFilter meshFilter = GetComponent<MeshFilter>();
         if(!meshFilter)
             meshFilter = gameObject.AddComponent<MeshFilter>();
@@ -372,6 +499,56 @@ public class PlaneCreation : MonoBehaviour
         collider.center = center - transform.position;
         collider.size = boundingBoxMax - boundingBoxMin;
         collider.size = new Vector3(Mathf.Abs(collider.size.x), Mathf.Abs(collider.size.y), Mathf.Abs(collider.size.z));
+        collider.isTrigger = true;
+
+    }
+
+    void AdjustXContour()
+    {
+        for (int i = 1; i < stripToVerticeCount[0] - 1; i++)
+        {
+            int z = i + stripToVerticeLocalOfs[0];
+            int index = GetVerticeIndex(0, z);
+            if (index >= 0)
+            {
+                int indexOrig = GetVerticeIndex(1, z);
+                if (indexOrig >= 0)
+                {
+                    Vector3 origPos = GetVertexGlobalPos(1, z);
+                    RaycastHit hit;
+                    if (CastRay(new Ray(origPos, Vector3.left), gridResolution, out hit))
+                        vertices[index].x = hit.point.x - boundingBoxMin.x;
+                }
+            }
+        }
+
+        for (int i = 1; i < stripToVerticeCount[simStripCount - 1] - 1; i++)
+        {
+            int z = i + stripToVerticeLocalOfs[simStripCount - 1];
+            int index = GetVerticeIndex(simStripCount - 1, z);
+            if (index >= 0)
+            {
+                int indexOrig = GetVerticeIndex(simStripCount-2, z);
+                if (indexOrig >= 0)
+                {
+                    Vector3 origPos = GetVertexGlobalPos(simStripCount - 2, z);
+                    RaycastHit hit;
+                    if (CastRay(new Ray(origPos, Vector3.right), gridResolution, out hit))
+                        vertices[index].x = hit.point.x - boundingBoxMin.x;
+                }
+            }
+        }
+
+        // AdjustXContour top and bottom z to the raycast extermes
+        int stripOfs = stripToVerticeGlobalOfs[0];
+        vertices[stripOfs].x = gridResolution;
+        vertices[stripToVerticeCount[stripOfs] - 1].x = gridResolution;
+
+        stripOfs = stripToVerticeGlobalOfs[simStripCount - 1];
+        float rightPos = gridResolution * (float)(simStripCount - 2);
+        vertices[stripOfs].x = rightPos;
+        vertices[stripOfs + stripToVerticeCount[simStripCount - 1] - 1].x = rightPos;
+
 
     }
 
@@ -379,9 +556,10 @@ public class PlaneCreation : MonoBehaviour
     {
         float Result = 0.0f;
 
-        // Diffusion Phase
+        // Compute all columns
         for (int i = 0; i < simSize; i++)
-                Result += vertices[i].y;
+            Result += vertices[i].y;
+
         return Result;
     }
 
@@ -398,7 +576,13 @@ public class PlaneCreation : MonoBehaviour
 
     void AdvectionPhase()
     {
-        float volumeToAddPerCell = (totalVolume - ComputeVolume()) / (float)simSize;
+        float targetVolume = totalVolume;
+
+        // Add up all submerged objects
+        foreach (var obj in physicObjects)
+            targetVolume += obj.submergedVolume;
+
+        float volumeToAddPerCell = (targetVolume - ComputeVolume()) / (float)simSize;
 
         // Advection Phase
         for (int i = 0; i < simSize; i++)
@@ -410,41 +594,100 @@ public class PlaneCreation : MonoBehaviour
         }
     }
 
-    int GetArrayIndexFromPos(Vector3 pos)
+    Vector3 GetYNormal(float x, float z, out float y)
     {
-        int x = (int)((pos.x - boundingBoxMin.x) / gridResolution);
-        int z = (int)((pos.z - boundingBoxMin.z) / gridResolution);
+        float wx1, wz1;
+        int y11Index = GetArrayIndexFromPos(x, z, out wx1, out wz1);
+        float wx2 = (1.0f - wx1);
+        float wz2 = (1.0f - wz1);
+
+        if (y11Index < 0)
+        {
+            y = boundingBoxMax.y;
+            return Vector3.up;
+        }
+
+        int y12Index = nextIndexZ[y11Index];
+        int y21Index = nextIndexX[y11Index];
+        int y22Index = nextIndexZ[y21Index];
+
+        float y11 = vertices[y11Index].y;
+        float y12 = vertices[y12Index].y;
+        float y21 = vertices[y21Index].y;
+        float y22 = vertices[y22Index].y;
+
+        y = boundingBoxMin.y + (y11 * wx1 * wz1) + (y11 * wx1 * wz2) + (y21 * wx2 * wz1) + (y22 * wx2 * wz2);
+
+        return Vector3.Cross(vertices[y11Index] - vertices[y12Index], vertices[y11Index] - vertices[y21Index]).normalized;      
+    }
+
+    // Return a local position relative to boundingBoxMin, from a (x, z) couple
+    Vector3 GetVertexLocalPos(int x, int z)
+    {
+        return new Vector3((float)x * gridResolution, boundingBoxMax.y - boundingBoxMin.y, (float)z * gridResolution - halfResolution);
+    }
+
+    // Return a global position from a (x, z) couple
+    Vector3 GetVertexGlobalPos(int x, int z)
+    {
+        return boundingBoxMin + GetVertexLocalPos(x, z);
+    }
+
+    // Return an index, based on a local int position
+    // return defaultVal if (x, z) is outside bound or doesn't have simulation point
+    int GetVerticeIndex(int x, int z, int defaultVal = -1)
+    {
+        if ((x < 0) || (x >= simStripCount))
+            return defaultVal;
+        if ((z < stripToVerticeLocalOfs[x]) || (z >= (stripToVerticeLocalOfs[x] + stripToVerticeCount[x])))
+            return defaultVal;
+        return stripToVerticeGlobalOfs[x] + z - stripToVerticeLocalOfs[x];
+    }
+
+    // Return an array index based on world position
+    int GetArrayIndexFromPos(Vector3 worldPos)
+    {
+        int x = (int)((worldPos.x - boundingBoxMin.x) / gridResolution);
+        int z = (int)((worldPos.z - boundingBoxMin.z) / gridResolution);
         return GetVerticeIndex(x, z);
     }
 
-    int GetArrayIndexFromZPos(float pz)
+    int GetArrayIndexFromPos(float px, float pz, out float weightX, out float weightZ)
     {
-        //return planeLength - (int)(pz + 6.5f - transform.position.z);
-        return 0;
+        float x = (int)((px - boundingBoxMin.x) / gridResolution);
+        float z = (int)((pz - boundingBoxMin.z) / gridResolution);
+        weightX = 1.0f - Mathf.Repeat(x, 1.0f);
+        weightZ = 1.0f - Mathf.Repeat(x, 1.0f);
+        return GetVerticeIndex((int)x, (int)z);
+    }    
+
+    void AddNewGameObject(GameObject obj)
+    {
+        Vector3 massCenterDelta;
+        float objVolume = EvaluateObjectVolume(obj, out massCenterDelta);
+        physicObjects.Add(new PhysicObject { gao = obj, volume = objVolume, massCenterDelta  = massCenterDelta });
     }
 
-    int GetArrayIndexFromXPos(float px, out float weight)
+    float EvaluateObjectVolume(GameObject obj, out Vector3 massCenterDelta)
     {
-        /*
-        float pos = (float)planeWidth - (px + 6.0f - transform.position.x);
-        int result = (int)pos;
-        weigth = 1.0f - (pos - (float)result);
-        return result;
-        */
-        weight = 0.0f;
-        return 0;
-    }
+        var boxCollider = obj.GetComponent<BoxCollider>();
+        if (boxCollider != null)
+        {
+            Debug.Log("Box Collider");
+            massCenterDelta = boxCollider.transform.position - obj.transform.position;
+            return boxCollider.size.x * obj.transform.localScale.x * boxCollider.size.y * obj.transform.localScale.y * boxCollider.size.z * obj.transform.localScale.z;
+        }
 
-    int GetArrayIndexFromZPos(float pz, out float weight)
-    {
-        /*
-        float pos = (float)planeLength - (pz + 6.0f - transform.position.z);
-        int result = (int)pos;
-        weigth = 1.0f - (pos - (float)result);
-        return result;
-        */
-        weight = 0.0f;
-        return 0;
+        var objCollider = obj.GetComponent<Collider>();
+        if (objCollider)
+        {
+            massCenterDelta = objCollider.transform.position - obj.transform.position;
+            return objCollider.bounds.size.x * objCollider.bounds.size.y * objCollider.bounds.size.z;
+        }
+
+        // Default mass Center is object center
+        massCenterDelta = new Vector3();
+        return 1.0f;
     }
 }
 
