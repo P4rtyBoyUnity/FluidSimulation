@@ -3,69 +3,74 @@ using System.Collections.Generic;
 using UnityEngine;
 
 /*
+ * ECS Simulation does not take viscosity, diffspeed into account & ammount to add per cell
+ * Fluid level should be different than the one at init time (so if the volume rise, we dont see the contour)
+ * - Separate Plane creation/Simulation & Object interaction (with same API for ECS, DFG, & Mono)
     - Water level can change if immerged object (check for places where we assume water level)
         - we must also change bounding box
-    - manage many types of objects shape (EvaluateObjectVolume...)
+    - Manage many types of objects shape (EvaluateObjectVolume...)
     - Improved objects physics
         - Manage splash
-            - Wave
+            - Wave in direction of impact
             - Objects slowdown
-    - Consider object mass & volume for floating
+        - Consider object mass & volume for floating
+        - when detecting surface level, take 5 measures (each bouding box corner + middle?) for object larger than grid
     - Skirt
-    - Initialshape config 
-        - use a separate script for evaluating surface?
-    - Create a frixed grid for inital config? (not good for parralel compute)
+    - Create a frixed grid for inital config? (not good for parallel compute)
 */
-    
 
 public class PlaneCreation : MonoBehaviour
 {
-    public bool         useSurfaceAreaDetection = false;
-    public bool         generateSkirt           = false;
-    public float        gridResolution          = 0.5f;
-    public Vector3      maxRayLength            = new Vector3(100.0f, 100.0f, 100.0f);
-    public float        diffusionSpeed          = 20.0f;
-    public float        viscosity               = 0.998f;
-    public uint         simulationIteration     = 1;
+    // 3 Types of simulation right now;
+    // - Reference  : Classic C3 simulation
+    // - ECS        : DOTS based simulation using ECS
+    // - DFG        : Simulation done with Data Flow Graph tech
+    public enum SimType { Reference, Ecs, Dfg };
+
+    public SimType simulationType = SimType.Reference;
+    public bool useSurfaceAreaDetection = false;
+    public bool generateSkirt = false;
+    public float gridResolution = 0.5f;
+    public Vector3 maxRayLength = new Vector3(100.0f, 100.0f, 100.0f);
+    public float diffusionSpeed = 20.0f;
+    public float viscosity = 0.998f;
+    public uint simulationIteration = 1;
 
     // Sim Data
-    private float       halfResolution          = 0.0f;
-    private Vector3     boundingBoxMin;
-    private Vector3     boundingBoxMax;
-    private int         simStripCount           = 0;
-    private int         simSize                 = 0;
-    private int         maxStripSize            = 0;
-    private float       totalVolume             = 0.0f;
+    private FluidSimulationInterface simulation = null;
+    private float halfResolution = 0.0f;
+    private Vector3 boundingBoxMin;
+    private Vector3 boundingBoxMax;
+    private int simStripCount = 0;
+    private int simSize = 0;
+    private int maxStripSize = 0;
+    private float totalVolume = 0.0f;
 
     // Array length == Nb X Values
-    private float[]     backLimitList           = new float[0];
-    private float[]     frontLimitList          = new float[0];
-    private int[]       stripToVerticeLocalOfs  = new int[0];
-    private int[]       stripToVerticeGlobalOfs = new int[0];
-    private int[]       stripToVerticeCount     = new int[0];
+    private float[] backLimitList = new float[0];
+    private float[] frontLimitList = new float[0];
+    private int[] stripToVerticeLocalOfs = new int[0];
+    private int[] stripToVerticeGlobalOfs = new int[0];
+    private int[] stripToVerticeCount = new int[0];
 
     // Array Length == Nb Vertex/Values Total
-    private float[]     speedY                  = new float[0];
-    private Vector3[]   vertices                = new Vector3[0];
-    private int[]       prevIndexX              = new int[0];
-    private int[]       nextIndexX              = new int[0];
-    private int[]       prevIndexZ              = new int[0];
-    private int[]       nextIndexZ              = new int[0];
+    private Vector3[] vertices = new Vector3[0];
+    private Neighbor[] neighbor = new Neighbor[0];
 
-    private Mesh        deformingMesh;
-    private BoxCollider collider;
+    private Mesh deformingMesh;
+    private BoxCollider simCollider;
 
     // Floating objects
     class PhysicObject
     {
-        public GameObject   gao;
-        public Vector3      massCenterDelta;
-        public float        volume;
+        public GameObject gao;
+        public Vector3 massCenterDelta;
+        public float volume;
 
         // updated every frame
-        public float        submergedVolume;            
+        public float submergedVolume;
     }
-    private List<PhysicObject> physicObjects    = new List<PhysicObject>();
+    private List<PhysicObject> physicObjects = new List<PhysicObject>();
 
     // Start is called before the first frame update
     void Start()
@@ -112,14 +117,21 @@ public class PlaneCreation : MonoBehaviour
             }
         }
 
-        CreateSimData();        
+        CreateSimData();
 
         CreateSurface();
 
         // Compute volume
         totalVolume = ComputeVolume();
 
-        //vertices[20].y = 2.0f;
+        vertices[25].y += 2.0f;
+
+        if (simulationType == SimType.Ecs)
+            simulation = new EcsSimulation(neighbor, ref vertices, diffusionSpeed, viscosity);
+        else if (simulationType == SimType.Dfg)
+            simulation = new DfgSimulation(neighbor, ref vertices, diffusionSpeed, viscosity);
+        else
+            simulation = new ReferenceFluidSimulation(neighbor, ref vertices, diffusionSpeed, viscosity);
     }
 
     // Update is called once per frame
@@ -127,28 +139,47 @@ public class PlaneCreation : MonoBehaviour
     {
         for (uint i = 0; i < simulationIteration; i++)
         {
-            DiffusionPhase();
+            simulation.Diffusion();
 
-            AdvectionPhase();
+            simulation.Advection(ComputeVolumeToAddPerCell());
         }
 
-        UpdateFloatingObjects();
+        simulation.ApplyToMesh();
+
+        /*
+        if (!UseEcs)
+        {
+            for (uint i = 0; i < simulationIteration; i++)
+            {
+                DiffusionPhase();
+
+                AdvectionPhase();
+            }
+        }
+        else
+        {            
+            for (int i = 0; i < simSize; i++)
+                vertices[i].y = entityManager.GetComponentData<HeightComponent>(entityArray[i]).height;
+        }
+    */
+
+        UpdateFloatingObjects();        
 
         if (Input.GetMouseButton(0))
         {
             Ray ray = Camera.main.ScreenPointToRay(Input.mousePosition);
             RaycastHit hit;
 
-            if (collider)
+            if (simCollider)
             {
-                collider.enabled = true;
-                if (collider.Raycast(ray, out hit, 100))
+                simCollider.enabled = true;
+                if (simCollider.Raycast(ray, out hit, 100))
                 {
                     int index = GetArrayIndexFromPos(hit.point);
-                    if(index != -1)
-                        speedY[index] -= 50.0f * Time.deltaTime;
+                    if (index != -1)
+                        simulation.SetSpeed(index, simulation.GetSpeed(index) - 50.0f * Time.deltaTime);
                 }
-                collider.enabled = false;
+                simCollider.enabled = false;
             }
         }
 
@@ -159,7 +190,7 @@ public class PlaneCreation : MonoBehaviour
     private void OnTriggerEnter(Collider other)
     {
         Debug.Log("Trigger Enter! " + other.gameObject.name);
-        AddNewGameObject(other.gameObject);        
+        AddNewGameObject(other.gameObject);
     }
 
     private void OnTriggerExit(Collider other)
@@ -180,7 +211,7 @@ public class PlaneCreation : MonoBehaviour
             cube.transform.localScale = new Vector3(Mathf.Max(Mathf.Abs(hit.point.x - ray.origin.x), 0.05f), Mathf.Max(Mathf.Abs(hit.point.y - ray.origin.y), 0.05f), Mathf.Max(Mathf.Abs(hit.point.z - ray.origin.z), 0.05f));
             */
             /////////
-            
+
             return true;
         }
 
@@ -206,7 +237,7 @@ public class PlaneCreation : MonoBehaviour
                 physicObjects[i].transform.rotation = Quaternion.FromToRotation(Vector3.up, normal);
                 */
 
-                
+
                 if (y > 0.0f)
                 {
                     float mv = physicObjects[i].volume / rigidBody.mass;
@@ -227,22 +258,29 @@ public class PlaneCreation : MonoBehaviour
                     float massInsideFluid = PercentageInFluid * physicObjects[i].volume;  //1.0 = liquid vm
                     float massOutsideFluid = (1.0f - PercentageInFluid) * rigidBody.mass;
                     float archimedRatio = massInsideFluid / (massInsideFluid + massOutsideFluid);
-
-                    Debug.Log("Mass in fluid=" + massInsideFluid + ", Mass outside fluid= " + massOutsideFluid + ", ArchiRatio=" + archimedRatio);
-
+                    
                     // Update submerged volume
                     float newSubmergedVolume = PercentageInFluid * physicObjects[i].volume;
                     float deltaSubmergedVolume = newSubmergedVolume - physicObjects[i].submergedVolume;
                     physicObjects[i].submergedVolume = newSubmergedVolume;
 
+                    Debug.Log("Mass in fluid=" + massInsideFluid + ", Mass outside fluid= " + massOutsideFluid + ", ArchiRatio=" + archimedRatio + ", Volume=" + physicObjects[i].volume);
+
                     // submerge volume effect
                     int index = GetArrayIndexFromPos(physicObjects[i].gao.transform.position);
+                    /*
                     if (index >= 0)
                         speedY[index] += deltaSubmergedVolume * 2.0f;
+                    */
+
+                    /* physic effect temporarily removed 
+                    if(index >= 0)
+                        simulation.SetSpeed(index, simulation.GetSpeed(index) + deltaSubmergedVolume * 2.0f);
 
                     rigidBody.AddForce((0.2f * archimedRatio * mv * normal * Physics.gravity.magnitude), ForceMode.Force);
                     if (rigidBody.velocity.y < 0.0f)
                         rigidBody.velocity = rigidBody.velocity * 0.98f;
+                        */
 
                     /*
                     if (Ratio > 0.0f)
@@ -284,13 +322,13 @@ public class PlaneCreation : MonoBehaviour
     /// <returns></returns>
     int ComputeZSurface(Vector3 StartX, float lengthX, float maxZDistance, float resolution, out float[] minZArray, out float[] maxZArray)
     {
-        int LimitListLength =  1 + Mathf.CeilToInt(lengthX / resolution);
+        int LimitListLength = 1 + Mathf.CeilToInt(lengthX / resolution);
 
         minZArray = new float[LimitListLength];
         maxZArray = new float[LimitListLength];
 
         Vector3 indexPos = StartX;
-        for (int i = 1; i < LimitListLength-1; i++)
+        for (int i = 1; i < LimitListLength - 1; i++)
         {
             indexPos.x = StartX.x + Mathf.Min((float)i * resolution, lengthX);
 
@@ -325,12 +363,12 @@ public class PlaneCreation : MonoBehaviour
             float backZ = backLimitList[i];
             float frontZ = frontLimitList[i];
 
-            if( i > 0)
+            if (i > 0)
             {
                 backZ = Mathf.Min(backZ, backLimitList[i - 1]);
                 frontZ = Mathf.Max(frontZ, frontLimitList[i - 1]);
             }
-            if (i < simStripCount-1)
+            if (i < simStripCount - 1)
             {
                 backZ = Mathf.Min(backZ, backLimitList[i + 1]);
                 frontZ = Mathf.Max(frontZ, frontLimitList[i + 1]);
@@ -354,11 +392,8 @@ public class PlaneCreation : MonoBehaviour
 
         // Allocate for the whole sim
         // Array Length == Nb Vertex/Values Total
-        speedY = new float[simSize];
-        prevIndexX = new int[simSize];
-        nextIndexX = new int[simSize];
-        prevIndexZ = new int[simSize];
-        nextIndexZ = new int[simSize];
+        //speedY = new float[simSize];
+        neighbor = new Neighbor[simSize];
 
         // Init sim
         for (int x = 0; x < simStripCount; x++)
@@ -367,11 +402,11 @@ public class PlaneCreation : MonoBehaviour
             {
                 int index = GetVerticeIndex(x, z);
                 if (index >= 0)
-                {                    
-                    prevIndexZ[index] = GetVerticeIndex(x, z - 1, index);
-                    nextIndexZ[index] = GetVerticeIndex(x, z + 1, index);
-                    prevIndexX[index] = GetVerticeIndex(x - 1, z, index);
-                    nextIndexX[index] = GetVerticeIndex(x + 1, z, index);
+                {
+                    neighbor[index].prevZ = GetVerticeIndex(x, z - 1, index);
+                    neighbor[index].nextZ = GetVerticeIndex(x, z + 1, index);
+                    neighbor[index].prevX = GetVerticeIndex(x - 1, z, index);
+                    neighbor[index].nextX = GetVerticeIndex(x + 1, z, index);
                     //Debug.Log("index " + index + " = " + prevIndexZ[index] + ", " + nextIndexZ[index] + ", " + prevIndexX[index] + ", " + nextIndexX[index]);
                 }
             }
@@ -384,23 +419,22 @@ public class PlaneCreation : MonoBehaviour
                 int index = GetVerticeIndex(x, z);
                 if (index >= 0)
                 {
-                    if((prevIndexZ[index] != index) && (prevIndexZ[index] != nextIndexZ[index]))
-                    prevIndexZ[index] = GetVerticeIndex(x, z - 1, index);
-                    nextIndexZ[index] = GetVerticeIndex(x, z + 1, index);
-                    prevIndexX[index] = GetVerticeIndex(x - 1, z, index);
-                    nextIndexX[index] = GetVerticeIndex(x + 1, z, index);
-                    //Debug.Log("index " + index + " = " + prevIndexZ[index] + ", " + nextIndexZ[index] + ", " + prevIndexX[index] + ", " + nextIndexX[index]);
+                    if ((neighbor[index].prevZ != index) && (neighbor[index].prevZ != neighbor[index].nextZ))
+                        neighbor[index].prevZ = GetVerticeIndex(x, z - 1, index);
+                    neighbor[index].nextZ = GetVerticeIndex(x, z + 1, index);
+                    neighbor[index].prevX = GetVerticeIndex(x - 1, z, index);
+                    neighbor[index].nextX = GetVerticeIndex(x + 1, z, index);
                 }
             }
-        }    
-}
+        }
+    }
 
     void CreateSurface()
     {
         vertices = new Vector3[simSize];
         Vector2[] uvs = new Vector2[simSize];
         int[] triangles = new int[simSize * 6];
-        
+
         int triangleIndex = 0;
         Vector3 halfBoundingBoxSize = boundingBoxMin;
 
@@ -432,7 +466,7 @@ public class PlaneCreation : MonoBehaviour
                     int nextZindex = GetVerticeIndex(x, z + 1);
                     int nextXZindex = GetVerticeIndex(x + 1, z + 1);
 
-                    if((nextXindex != -1) && (nextZindex != -1) && (nextXZindex != -1))
+                    if ((nextXindex != -1) && (nextZindex != -1) && (nextXZindex != -1))
                     {
                         triangles[triangleIndex++] = index;
                         triangles[triangleIndex++] = nextZindex;
@@ -467,7 +501,7 @@ public class PlaneCreation : MonoBehaviour
 
         // Create the mesh!
         MeshFilter meshFilter = GetComponent<MeshFilter>();
-        if(!meshFilter)
+        if (!meshFilter)
             meshFilter = gameObject.AddComponent<MeshFilter>();
 
         deformingMesh = new Mesh();
@@ -494,12 +528,12 @@ public class PlaneCreation : MonoBehaviour
         //////////
 
         // Create collider
-        collider = gameObject.AddComponent<BoxCollider>();
-        Vector3 center = (boundingBoxMin + boundingBoxMax) / 2.0f;        
-        collider.center = center - transform.position;
-        collider.size = boundingBoxMax - boundingBoxMin;
-        collider.size = new Vector3(Mathf.Abs(collider.size.x), Mathf.Abs(collider.size.y), Mathf.Abs(collider.size.z));
-        collider.isTrigger = true;
+        simCollider = gameObject.AddComponent<BoxCollider>();
+        Vector3 center = (boundingBoxMin + boundingBoxMax) / 2.0f;
+        simCollider.center = center - transform.position;
+        simCollider.size = boundingBoxMax - boundingBoxMin;
+        simCollider.size = new Vector3(Mathf.Abs(simCollider.size.x), Mathf.Abs(simCollider.size.y), Mathf.Abs(simCollider.size.z));
+        simCollider.isTrigger = true;
 
     }
 
@@ -528,7 +562,7 @@ public class PlaneCreation : MonoBehaviour
             int index = GetVerticeIndex(simStripCount - 1, z);
             if (index >= 0)
             {
-                int indexOrig = GetVerticeIndex(simStripCount-2, z);
+                int indexOrig = GetVerticeIndex(simStripCount - 2, z);
                 if (indexOrig >= 0)
                 {
                     Vector3 origPos = GetVertexGlobalPos(simStripCount - 2, z);
@@ -555,25 +589,47 @@ public class PlaneCreation : MonoBehaviour
     float ComputeVolume()
     {
         float Result = 0.0f;
+        float gridResolutionSquare = gridResolution * gridResolution;
 
         // Compute all columns
         for (int i = 0; i < simSize; i++)
-            Result += vertices[i].y;
+            Result += vertices[i].y * gridResolutionSquare;
 
         return Result;
     }
 
+    float ComputeVolumeToAddPerCell()
+    {
+        float targetVolume = totalVolume;
+        float submergedVolume = 0.0f;
+
+        // Add up all submerged objects
+        foreach (var obj in physicObjects)
+        {
+            Debug.Log("Submerged volume=" + obj.submergedVolume);
+            submergedVolume += obj.submergedVolume;
+        }
+
+        targetVolume += submergedVolume;
+
+        float computedVolume = ComputeVolume();
+        Debug.Log("target = " + targetVolume + ", Compute=" + computedVolume);
+
+        return (targetVolume - computedVolume) / ((float)simSize * gridResolution * gridResolution);
+    }
+
+    /*
     void DiffusionPhase()
     {
         // Diffusion Phase
         for (int i = 0; i < simSize; i++)
         {
             float transferRate = diffusionSpeed * Time.deltaTime;
-            speedY[i] += ((vertices[prevIndexX[i]].y + vertices[nextIndexX[i]].y + vertices[prevIndexZ[i]].y + vertices[nextIndexZ[i]].y) / 4.0f - vertices[i].y) * transferRate;
-            speedY[i] *= viscosity;            
+            speedY[i] += ((vertices[neighbor[i].prevX].y + vertices[neighbor[i].nextX].y + vertices[neighbor[i].prevZ].y + vertices[neighbor[i].nextZ].y) / 4.0f - vertices[i].y) * transferRate;
+            speedY[i] *= viscosity;
         }
     }
-
+    
     void AdvectionPhase()
     {
         float targetVolume = totalVolume;
@@ -593,6 +649,7 @@ public class PlaneCreation : MonoBehaviour
                 vertices[i].y = 0.0f;
         }
     }
+    */
 
     Vector3 GetYNormal(float x, float z, out float y)
     {
@@ -607,9 +664,9 @@ public class PlaneCreation : MonoBehaviour
             return Vector3.up;
         }
 
-        int y12Index = nextIndexZ[y11Index];
-        int y21Index = nextIndexX[y11Index];
-        int y22Index = nextIndexZ[y21Index];
+        int y12Index = neighbor[y11Index].nextZ;
+        int y21Index = neighbor[y11Index].nextX;
+        int y22Index = neighbor[y21Index].nextX; ;
 
         float y11 = vertices[y11Index].y;
         float y12 = vertices[y12Index].y;
@@ -618,7 +675,7 @@ public class PlaneCreation : MonoBehaviour
 
         y = boundingBoxMin.y + (y11 * wx1 * wz1) + (y11 * wx1 * wz2) + (y21 * wx2 * wz1) + (y22 * wx2 * wz2);
 
-        return Vector3.Cross(vertices[y11Index] - vertices[y12Index], vertices[y11Index] - vertices[y21Index]).normalized;      
+        return Vector3.Cross(vertices[y11Index] - vertices[y12Index], vertices[y11Index] - vertices[y21Index]).normalized;
     }
 
     // Return a local position relative to boundingBoxMin, from a (x, z) couple
@@ -659,13 +716,13 @@ public class PlaneCreation : MonoBehaviour
         weightX = 1.0f - Mathf.Repeat(x, 1.0f);
         weightZ = 1.0f - Mathf.Repeat(x, 1.0f);
         return GetVerticeIndex((int)x, (int)z);
-    }    
+    }
 
     void AddNewGameObject(GameObject obj)
     {
         Vector3 massCenterDelta;
         float objVolume = EvaluateObjectVolume(obj, out massCenterDelta);
-        physicObjects.Add(new PhysicObject { gao = obj, volume = objVolume, massCenterDelta  = massCenterDelta });
+        physicObjects.Add(new PhysicObject { gao = obj, volume = objVolume, massCenterDelta = massCenterDelta });
     }
 
     float EvaluateObjectVolume(GameObject obj, out Vector3 massCenterDelta)
@@ -689,5 +746,93 @@ public class PlaneCreation : MonoBehaviour
         massCenterDelta = new Vector3();
         return 1.0f;
     }
+
+    /// <summary>
+    ///  ECS
+    /// </summary>
+    /// 
+    /*
+    void InitEcsSimulation()
+    {
+        entityManager = World.DefaultGameObjectInjectionWorld.EntityManager;
+        EntityArchetype entityArchetype = entityManager.CreateArchetype(typeof(SpeedComponent),
+                                                                        typeof(HeightComponent),
+                                                                        typeof(NeighborComponent));
+
+        entityArray = new NativeArray<Entity>(simSize, Allocator.Persistent);
+        entityManager.CreateEntity(entityArchetype, entityArray);
+
+        for (int i = 0; i < simSize; i++)
+        {
+            Entity entity = entityArray[i];
+
+            Entity prevX = entityArray[neighbor[i].prevX];
+            Entity nextX = entityArray[neighbor[i].nextX];
+            Entity prevZ = entityArray[neighbor[i].prevZ];
+            Entity nextZ = entityArray[neighbor[i].nextZ];
+
+            // Init Speed @ 0
+            entityManager.SetComponentData(entity, new SpeedComponent { speed = 0.0f });
+            // Init height
+            entityManager.SetComponentData(entity, new HeightComponent { height = vertices[i].y });
+            // Init neighbors
+            entityManager.SetComponentData(entity, new NeighborComponent { entityPrevX = prevX, entityNextX = nextX, entityPrevZ = prevZ, entityNextZ = nextZ });
+            // Set material
+            //entityManager.SetSharedComponentData(entity, new RenderMesh { mesh = meshToDeform, material = material, });
+        }
+    }
+    */
 }
 
+
+/*
+Data required for Diffusion
+---------------------------
+- (RO) SimSize
+- (RO) diffusionSpeed
+- (RO) Topology				
+- (RO) Vertices[]/height		
+- (WR) Speed[]				
+
+Data required for Advection
+---------------------------
+- (RO) Volume
+	- (RO) Vertices[]/height
+*** (RO) Objects volume
+- (RO) SimSize
+- (RW) Vertices[]/height
+- (RO) speed[]
+- (RO) Topology
+
+Data required for objects sim
+-----------------------------
+
+- Bouding box for detection
+- Topology to transfer pos -> index
+- (RO) Vertices[]/height (for now)
+- (RW) Speed[]
+- (RW ) Objects Volume
+
+
+
+--------------------------------
+
+Topology =
+SimSize
+list of neighbor[SimSize]
+
+OR
+
+SizeX, SizeZ
+SimSize
+ArrayOfIndex[SizeX * SizeZ]
+
+---------------------------------
+
+For simulation, topo is suffficent
+For object interation & forces, we need topo + pos translation.
+Pos translation is easy with grid
+With option 1, it requieres strips OR maybe we can embed x/z in index ?
+
+
+ * */

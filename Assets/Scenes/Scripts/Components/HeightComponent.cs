@@ -3,7 +3,7 @@ using System.Collections.Generic;
 using UnityEngine;
 using Unity.Entities;
 
-public unsafe struct HeightSharedComponent : ISharedComponentData
+public struct HeightComponent : IComponentData
 {
-    public fixed float Height[400];
+    public float height;
 }
