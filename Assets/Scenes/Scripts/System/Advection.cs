@@ -3,10 +3,12 @@ using System.Collections.Generic;
 using UnityEngine;
 using Unity.Entities;
 using Unity.Transforms;
+using Unity.Burst;
 
 [UpdateAfter(typeof(Diffusion))]
 public class Advection : ComponentSystem
 {
+    [BurstCompile]
     protected override void OnUpdate()
     {
         Entities.ForEach((ref HeightComponent height, ref SpeedComponent speed) => {

@@ -13,6 +13,7 @@ public struct Neighbor
 public interface FluidSimulationInterface
 {
     //void InitSimulation(Neighbor[] neighbor, ref Vector3[] vertices);
+    void Dispose();
     void ApplyToMesh();
     void Advection(float volumeToAddPerCell);
     void Diffusion();

@@ -3,12 +3,13 @@ using System.Collections.Generic;
 using UnityEngine;
 using Unity.Entities;
 using Unity.Transforms;
-
+using Unity.Burst;
 
 public class Diffusion : ComponentSystem
 {
     const float DIFFUSION_SPEED = 20.0f;
 
+    [BurstCompile]
     protected override void OnUpdate()
     {
         // TODO: height & neighbor are read-only

@@ -47,7 +47,7 @@ public class EcsSimulation : FluidSimulationInterface
         }
     }
 
-    ~EcsSimulation()
+    public void Dispose()
     {
         entityArray.Dispose();
     }
@@ -74,12 +74,11 @@ public class EcsSimulation : FluidSimulationInterface
 
     public float GetSpeed(int index)
     {
-        //TODO
-        return 0.0f;
+        return entityManager.GetComponentData<SpeedComponent>(entityArray[index]).speed;
     }
 
     public void SetSpeed(int index, float speed)
     {
-        //TODO
+        entityManager.SetComponentData<SpeedComponent>(entityArray[index], new SpeedComponent { speed = speed });
     }
 }

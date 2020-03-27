@@ -72,6 +72,12 @@ public class PlaneCreation : MonoBehaviour
     }
     private List<PhysicObject> physicObjects = new List<PhysicObject>();
 
+    public void Dispose()
+    {
+        if (simulation != null)
+            { simulation.Dispose(); }
+    }
+
     // Start is called before the first frame update
     void Start()
     {
@@ -131,7 +137,7 @@ public class PlaneCreation : MonoBehaviour
         else if (simulationType == SimType.Dfg)
             simulation = new DfgSimulation(neighbor, ref vertices, diffusionSpeed, viscosity);
         else
-            simulation = new ReferenceFluidSimulation(neighbor, ref vertices, diffusionSpeed, viscosity);
+            simulation = new ReferenceFluidSimulation(neighbor, ref vertices, diffusionSpeed, viscosity);        
     }
 
     // Update is called once per frame
@@ -139,31 +145,22 @@ public class PlaneCreation : MonoBehaviour
     {
         for (uint i = 0; i < simulationIteration; i++)
         {
+            UnityEngine.Profiling.Profiler.BeginSample("Diffusion");
             simulation.Diffusion();
+            UnityEngine.Profiling.Profiler.EndSample();
 
+            UnityEngine.Profiling.Profiler.BeginSample("Advection");
             simulation.Advection(ComputeVolumeToAddPerCell());
+            UnityEngine.Profiling.Profiler.EndSample();
         }
 
+        UnityEngine.Profiling.Profiler.BeginSample("ApplyToMesh");
         simulation.ApplyToMesh();
+        UnityEngine.Profiling.Profiler.EndSample();
 
-        /*
-        if (!UseEcs)
-        {
-            for (uint i = 0; i < simulationIteration; i++)
-            {
-                DiffusionPhase();
-
-                AdvectionPhase();
-            }
-        }
-        else
-        {            
-            for (int i = 0; i < simSize; i++)
-                vertices[i].y = entityManager.GetComponentData<HeightComponent>(entityArray[i]).height;
-        }
-    */
-
-        UpdateFloatingObjects();        
+        UnityEngine.Profiling.Profiler.BeginSample("Physic objects");
+        UpdateFloatingObjects();
+        UnityEngine.Profiling.Profiler.EndSample();
 
         if (Input.GetMouseButton(0))
         {
@@ -606,14 +603,14 @@ public class PlaneCreation : MonoBehaviour
         // Add up all submerged objects
         foreach (var obj in physicObjects)
         {
-            Debug.Log("Submerged volume=" + obj.submergedVolume);
+            //Debug.Log("Submerged volume=" + obj.submergedVolume);
             submergedVolume += obj.submergedVolume;
         }
 
         targetVolume += submergedVolume;
 
         float computedVolume = ComputeVolume();
-        Debug.Log("target = " + targetVolume + ", Compute=" + computedVolume);
+        //Debug.Log("target = " + targetVolume + ", Compute=" + computedVolume);
 
         return (targetVolume - computedVolume) / ((float)simSize * gridResolution * gridResolution);
     }

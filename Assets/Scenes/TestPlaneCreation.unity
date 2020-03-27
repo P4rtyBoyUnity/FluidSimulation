@@ -165,10 +165,10 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 07b78855b956c4c428a14023f3c45a76, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  simulationType: 0
+  simulationType: 2
   useSurfaceAreaDetection: 1
   generateSkirt: 0
-  gridResolution: 0.1
+  gridResolution: 0.5
   maxRayLength: {x: 5, y: 5, z: 5}
   diffusionSpeed: 20
   viscosity: 0.998

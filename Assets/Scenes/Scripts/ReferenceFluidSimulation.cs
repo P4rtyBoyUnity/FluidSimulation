@@ -20,6 +20,11 @@ public class ReferenceFluidSimulation : FluidSimulationInterface
         this.viscosity = viscosity;
     }
 
+    public void Dispose()
+    {
+
+    }
+
     public void Advection(float volumeToAddPerCell)
     {
         // Advection Phase
