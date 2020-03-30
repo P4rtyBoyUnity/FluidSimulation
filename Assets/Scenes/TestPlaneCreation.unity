@@ -168,7 +168,7 @@ MonoBehaviour:
   simulationType: 2
   useSurfaceAreaDetection: 1
   generateSkirt: 0
-  gridResolution: 0.5
+  gridResolution: 0.1
   maxRayLength: {x: 5, y: 5, z: 5}
   diffusionSpeed: 20
   viscosity: 0.998
@@ -231,7 +231,7 @@ GameObject:
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
   m_StaticEditorFlags: 0
-  m_IsActive: 0
+  m_IsActive: 1
 --- !u!54 &481837413
 Rigidbody:
   m_ObjectHideFlags: 0

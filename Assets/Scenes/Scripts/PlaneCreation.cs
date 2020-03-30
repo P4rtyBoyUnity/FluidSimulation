@@ -132,6 +132,8 @@ public class PlaneCreation : MonoBehaviour
 
         vertices[25].y += 2.0f;
 
+        Debug.Log("Nb Vertices = " + vertices.Length);
+
         if (simulationType == SimType.Ecs)
             simulation = new EcsSimulation(neighbor, ref vertices, diffusionSpeed, viscosity);
         else if (simulationType == SimType.Dfg)
@@ -143,14 +145,19 @@ public class PlaneCreation : MonoBehaviour
     // Update is called once per frame
     void Update()
     {
+        float deltaT = Time.deltaTime / simulationIteration;
         for (uint i = 0; i < simulationIteration; i++)
         {
+            UnityEngine.Profiling.Profiler.BeginSample("ApplyForcesToSimulation");
+            simulation.ApplyForcesToSimulation(deltaT);
+            UnityEngine.Profiling.Profiler.EndSample();
+
             UnityEngine.Profiling.Profiler.BeginSample("Diffusion");
-            simulation.Diffusion();
+            simulation.Diffusion(deltaT);
             UnityEngine.Profiling.Profiler.EndSample();
 
             UnityEngine.Profiling.Profiler.BeginSample("Advection");
-            simulation.Advection(ComputeVolumeToAddPerCell());
+            simulation.Advection(ComputeVolumeToAddPerCell(), deltaT);
             UnityEngine.Profiling.Profiler.EndSample();
         }
 
@@ -173,8 +180,12 @@ public class PlaneCreation : MonoBehaviour
                 if (simCollider.Raycast(ray, out hit, 100))
                 {
                     int index = GetArrayIndexFromPos(hit.point);
+                    /*
                     if (index != -1)
                         simulation.SetSpeed(index, simulation.GetSpeed(index) - 50.0f * Time.deltaTime);
+                        */
+                    if (index != -1)
+                        simulation.ApplyForce(index, -30.0f, 1.0f);
                 }
                 simCollider.enabled = false;
             }

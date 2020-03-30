@@ -52,7 +52,36 @@ public class EcsSimulation : FluidSimulationInterface
         entityArray.Dispose();
     }
 
-    public void Advection(float volumeToAddPerCell)
+    public void SetViscosity(float viscosity)
+    {
+        //this.viscosity = viscosity;
+    }
+
+    public void SetDiffusionSpeed(float diffusionSpeed)
+    {
+        //this.diffusionSpeed = diffusionSpeed;
+    }
+
+    public void ApplyForce(int indexToApply, float force, float mass)
+    {
+        //forcesToApply.Add(new Force { index = indexToApply, acceleration = force / mass });
+    }
+
+
+    // Phase 1
+    public void ApplyForcesToSimulation(float deltaT)
+    {
+        /*
+        foreach (Force force in forcesToApply)
+        {
+            // TODO: Reduce speed around
+            speedY[force.index] += force.acceleration * deltaT;
+        }
+        */
+    }
+
+    // Phase 2
+    public void Advection(float volumeToAddPerCell, float deltaT)
     {
         // All advection is done by ECS
 
@@ -61,11 +90,13 @@ public class EcsSimulation : FluidSimulationInterface
             vertices[i].y += volumeToAddPerCell;
     }
 
-    public void Diffusion()
+    // Phase 3
+    public void Diffusion(float deltaT)
     {
         // Nothing to do, done in ECS
     }
 
+    // Phase 4
     public void ApplyToMesh()
     {
         for (int i = 0; i < vertices.Length; i++)

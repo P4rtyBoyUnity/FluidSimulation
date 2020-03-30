@@ -4,56 +4,18 @@ using UnityEngine;
 using Unity.DataFlowGraph;
 using Unity.Burst;
 
-public class AdvectionNode : NodeDefinition<AdvectionNode.InstanceData, AdvectionNode.KernelData, AdvectionNode.Ports, AdvectionNode.GraphKernel>
+
+public class DiffusionNode : NodeDefinition<DiffusionNode.InstanceData, DiffusionNode.SimPorts, DiffusionNode.KernelData, DiffusionNode.Ports, DiffusionNode.GraphKernel>, IMsgHandler<float>
 {
-    public struct KernelData : IKernelData {}
-
-    public struct InstanceData : INodeData {}
-
-    public struct Ports : IKernelPortDefinition
+    public struct KernelData : IKernelData
     {
-        // Common Inputs
-        public DataInput<AdvectionNode, float> inDeltaT;
-        public DataInput<AdvectionNode, float> inVolumeToAdd;
-
-        // Node specific inputs
-        public DataInput<AdvectionNode, float> inHeight;
-        public DataInput<AdvectionNode, float> inSpeed;
-
-        // Outputs
-        public DataOutput<AdvectionNode, float> outSpeed;
-        public DataOutput<AdvectionNode, float> outHeight;
+        public float acceleration;
     }
 
-    public struct GraphKernel : IGraphKernel<KernelData, Ports>
+    public struct InstanceData : INodeData
     {
-        //float height;
-
-        public void Execute(RenderContext ctx, KernelData data, ref Ports ports)
-        {
-            // Read inputs
-            float speed = ctx.Resolve(ports.inSpeed);
-            float height = ctx.Resolve(ports.inHeight);
-            float volumeToAdd = ctx.Resolve(ports.inVolumeToAdd);
-            float deltaT = ctx.Resolve(ports.inDeltaT);
-
-            // Compute
-            height = Mathf.Max(height + volumeToAdd + speed * deltaT, 0.0f);
-
-            // Write outputs
-            ref var outputSpeed = ref ctx.Resolve(ref ports.outSpeed);
-            outputSpeed = speed;
-            ref var outputHeight = ref ctx.Resolve(ref ports.outHeight);
-            outputHeight = height;
-        }
+        public float accumulatedAcceleration;
     }
-}
-
-public class DiffusionNode : NodeDefinition<DiffusionNode.InstanceData, DiffusionNode.KernelData, DiffusionNode.Ports, DiffusionNode.GraphKernel>
-{ 
-    public struct KernelData : IKernelData { }
-
-    public struct InstanceData : INodeData { }
 
     public struct Ports : IKernelPortDefinition
     {
@@ -63,38 +25,96 @@ public class DiffusionNode : NodeDefinition<DiffusionNode.InstanceData, Diffusio
         public DataInput<DiffusionNode, float> inViscosity;
 
         // Node specific inputs
-        public DataInput<DiffusionNode, float> inSpeed;
+        //public DataInput<DiffusionNode, float> inForce;
         public DataInput<DiffusionNode, float> inHeight;
         public DataInput<DiffusionNode, float> inHeightPrevX, inHeightPrevZ, inHeightNextX, inHeightNextZ;
 
         // Outputs
         public DataOutput<DiffusionNode, float> outSpeed;
-        public DataOutput<DiffusionNode, float> outHeight;
+    }
+
+    public struct SimPorts : ISimulationPortDefinition
+    {
+        public MessageInput<DiffusionNode, float> accelerationInput;
+    }
+
+    protected override void OnUpdate(in UpdateContext ctx)
+    {
+        ref var nodeData = ref GetNodeData(ctx.Handle);
+        ref KernelData kernelData = ref GetKernelData(ctx.Handle);
+        kernelData.acceleration = nodeData.accumulatedAcceleration;
+        nodeData.accumulatedAcceleration = 0.0f;
+    }
+
+    public void HandleMessage(in MessageContext ctx, in float msg)
+    {
+        ref var nodeData = ref GetNodeData(ctx.Handle);
+        nodeData.accumulatedAcceleration += msg;
     }
 
     public struct GraphKernel : IGraphKernel<KernelData, Ports>
     {
-        //float speed;
+        float speed;
 
+        [BurstCompile]
         public void Execute(RenderContext ctx, KernelData data, ref Ports ports)
         {
             // Read inputs
-            float transferRate = ctx.Resolve(ports.inDiffusionSpeed) * ctx.Resolve(ports.inDeltaT);
+            float deltaT = ctx.Resolve(ports.inDeltaT);
+            float diffusionSpeed = ctx.Resolve(ports.inDiffusionSpeed);
             float viscosity = ctx.Resolve(ports.inViscosity);
             float height = ctx.Resolve(ports.inHeight);
-            float speed = ctx.Resolve(ports.inSpeed);
             float prevX = ctx.Resolve(ports.inHeightPrevX);
             float nextX = ctx.Resolve(ports.inHeightNextX);
             float prevZ = ctx.Resolve(ports.inHeightPrevZ);
             float nextZ = ctx.Resolve(ports.inHeightNextZ);            
 
             // Compute
-            speed += ((prevX + nextX + prevZ + nextZ) / 4.0f - height) * transferRate;
+            speed += (data.acceleration + ((prevX + nextX + prevZ + nextZ) / 4.0f - height) * diffusionSpeed) * deltaT;
             speed  *= viscosity;            
 
             // Write outputs
             ref var outputSpeed = ref ctx.Resolve(ref ports.outSpeed);
             outputSpeed = speed;
+        }
+    }
+}
+
+public class AdvectionNode : NodeDefinition<AdvectionNode.InstanceData, AdvectionNode.KernelData, AdvectionNode.Ports, AdvectionNode.GraphKernel>
+{
+    public struct KernelData : IKernelData { }
+
+    public struct InstanceData : INodeData { }
+
+    public struct Ports : IKernelPortDefinition
+    {
+        // Common Inputs
+        public DataInput<AdvectionNode, float> inDeltaT;
+        public DataInput<AdvectionNode, float> inVolumeToAdd;
+
+        // Node specific inputs
+        public DataInput<AdvectionNode, float> inSpeed;
+
+        // Outputs
+        public DataOutput<AdvectionNode, float> outHeight;
+    }
+
+    public struct GraphKernel : IGraphKernel<KernelData, Ports>
+    {
+        float height;
+
+        [BurstCompile]
+        public void Execute(RenderContext ctx, KernelData data, ref Ports ports)
+        {
+            // Read inputs
+            float speed = ctx.Resolve(ports.inSpeed);
+            float volumeToAdd = ctx.Resolve(ports.inVolumeToAdd);
+            float deltaT = ctx.Resolve(ports.inDeltaT);
+
+            // Compute
+            height = Mathf.Max(height + volumeToAdd + speed * deltaT, 0.0f);
+
+            // Write outputs
             ref var outputHeight = ref ctx.Resolve(ref ports.outHeight);
             outputHeight = height;
         }
@@ -124,6 +144,7 @@ public class UniformNode: NodeDefinition<UniformNode.InstanceData, UniformNode.K
 
     public struct GraphKernel : IGraphKernel<KernelData, Ports>
     {
+        [BurstCompile]
         public void Execute(RenderContext ctx, KernelData data, ref Ports ports)
         {
             ref var deltaT = ref ctx.Resolve(ref ports.outDeltaT);
@@ -145,12 +166,9 @@ public class UniformNode: NodeDefinition<UniformNode.InstanceData, UniformNode.K
 public class DfgSimulation : FluidSimulationInterface
 {
     private Vector3[] vertices = null;
-    private float[] speed = null;
-    //List<NodeHandle<ScatteringNode>> m_ScatteringNodeList = new List<NodeHandle<ScatteringNode>>();
     NodeHandle<UniformNode> m_UniformNode;
     List<NodeHandle<DiffusionNode>> m_DiffusionNodeList = new List<NodeHandle<DiffusionNode>>();
     List<NodeHandle<AdvectionNode>> m_AdvectionNodeList = new List<NodeHandle<AdvectionNode>>();
-    List<GraphValue<float>>         m_SpeedGraphValues = new List<GraphValue<float>>();
     List<GraphValue<float>>         m_HeightGraphValues = new List<GraphValue<float>>();
     NodeSet m_Set;
 
@@ -158,14 +176,8 @@ public class DfgSimulation : FluidSimulationInterface
     {
         this.vertices = vertices;
         m_Set = new NodeSet();
-        m_Set.RendererModel = NodeSet.RenderExecutionModel.Islands;
-        speed = new float[vertices.Length];
-
-        /*
-        // Create Scattering nodes
-        for (uint i = 0; i < vertices.Length; i++)
-            m_ScatteringNodeList.Add(m_Set.Create<ScatteringNode>());
-        */
+        //m_Set.RendererModel = NodeSet.RenderExecutionModel.Islands;
+        m_Set.RendererModel = NodeSet.RenderExecutionModel.SingleThreaded;
 
         // Create uniform node (the one with all shared values)
         m_UniformNode = m_Set.Create<UniformNode>();
@@ -176,34 +188,35 @@ public class DfgSimulation : FluidSimulationInterface
             m_DiffusionNodeList.Add(m_Set.Create<DiffusionNode>());
             // Create Advections nodes
             m_AdvectionNodeList.Add(m_Set.Create<AdvectionNode>());
-            // Create Speed reading graph values
-            m_SpeedGraphValues.Add(m_Set.CreateGraphValue(m_DiffusionNodeList[(int)i], DiffusionNode.KernelPorts.outHeight));
             // Create Height reading graph values
-            m_HeightGraphValues.Add(m_Set.CreateGraphValue(m_DiffusionNodeList[(int)i], DiffusionNode.KernelPorts.outSpeed));
-        }
-            
+            m_HeightGraphValues.Add(m_Set.CreateGraphValue(m_AdvectionNodeList[(int)i], AdvectionNode.KernelPorts.outHeight));
+        }            
 
-        // Connects Nodes;1 layer = advection, 2nd layer = diffusion        
+        // Connects Nodes;1 layer = diffusion, 2nd layer = advection
         for (int i = 0; i < vertices.Length; i++)
         {
-            // Connect uniforms to 1st stage (advection)
-            m_Set.Connect(m_UniformNode, UniformNode.KernelPorts.outDeltaT, m_AdvectionNodeList[i], AdvectionNode.KernelPorts.inDeltaT);
-            m_Set.Connect(m_UniformNode, UniformNode.KernelPorts.outVolumeToAdd, m_AdvectionNodeList[i], AdvectionNode.KernelPorts.inVolumeToAdd);
-
-            // Connect 1st stage advection to 2nd stage diffusion 
-            m_Set.Connect(m_AdvectionNodeList[i], AdvectionNode.KernelPorts.outHeight, m_DiffusionNodeList[i], DiffusionNode.KernelPorts.inHeight);
-            m_Set.Connect(m_AdvectionNodeList[neighbor[i].prevX], AdvectionNode.KernelPorts.outHeight, m_DiffusionNodeList[i], DiffusionNode.KernelPorts.inHeightPrevX);
-            m_Set.Connect(m_AdvectionNodeList[neighbor[i].nextX], AdvectionNode.KernelPorts.outHeight, m_DiffusionNodeList[i], DiffusionNode.KernelPorts.inHeightNextX);
-            m_Set.Connect(m_AdvectionNodeList[neighbor[i].prevZ], AdvectionNode.KernelPorts.outHeight, m_DiffusionNodeList[i], DiffusionNode.KernelPorts.inHeightPrevZ);
-            m_Set.Connect(m_AdvectionNodeList[neighbor[i].nextZ], AdvectionNode.KernelPorts.outHeight, m_DiffusionNodeList[i], DiffusionNode.KernelPorts.inHeightNextZ);
-            m_Set.Connect(m_AdvectionNodeList[i], AdvectionNode.KernelPorts.outSpeed, m_DiffusionNodeList[i], DiffusionNode.KernelPorts.inSpeed);
-
-            // Connect uniforms to 2nd stage (diffusion)
+            // Connect uniforms to 1st stage (diffusion)
             m_Set.Connect(m_UniformNode, UniformNode.KernelPorts.outDeltaT, m_DiffusionNodeList[i], DiffusionNode.KernelPorts.inDeltaT);
             m_Set.Connect(m_UniformNode, UniformNode.KernelPorts.outDiffusionSpeed, m_DiffusionNodeList[i], DiffusionNode.KernelPorts.inDiffusionSpeed);
             m_Set.Connect(m_UniformNode, UniformNode.KernelPorts.outViscosity, m_DiffusionNodeList[i], DiffusionNode.KernelPorts.inViscosity);
+
+            // Connect advection output to 1st stage diffusion inputs
+            m_Set.Connect(m_AdvectionNodeList[i], AdvectionNode.KernelPorts.outHeight, m_DiffusionNodeList[i], DiffusionNode.KernelPorts.inHeight, NodeSet.ConnectionType.Feedback);
+            m_Set.Connect(m_AdvectionNodeList[neighbor[i].prevX], AdvectionNode.KernelPorts.outHeight, m_DiffusionNodeList[i], DiffusionNode.KernelPorts.inHeightPrevX, NodeSet.ConnectionType.Feedback);
+            m_Set.Connect(m_AdvectionNodeList[neighbor[i].nextX], AdvectionNode.KernelPorts.outHeight, m_DiffusionNodeList[i], DiffusionNode.KernelPorts.inHeightNextX, NodeSet.ConnectionType.Feedback);
+            m_Set.Connect(m_AdvectionNodeList[neighbor[i].prevZ], AdvectionNode.KernelPorts.outHeight, m_DiffusionNodeList[i], DiffusionNode.KernelPorts.inHeightPrevZ, NodeSet.ConnectionType.Feedback);
+            m_Set.Connect(m_AdvectionNodeList[neighbor[i].nextZ], AdvectionNode.KernelPorts.outHeight, m_DiffusionNodeList[i], DiffusionNode.KernelPorts.inHeightNextZ, NodeSet.ConnectionType.Feedback);
+
+            // Connect uniforms to 2nd stage (advection)
+            m_Set.Connect(m_UniformNode, UniformNode.KernelPorts.outDeltaT, m_AdvectionNodeList[i], AdvectionNode.KernelPorts.inDeltaT);
+            m_Set.Connect(m_UniformNode, UniformNode.KernelPorts.outVolumeToAdd, m_AdvectionNodeList[i], AdvectionNode.KernelPorts.inVolumeToAdd);
+
+            // Connect diffusion output to 2nd stage advection inputs
+            m_Set.Connect(m_DiffusionNodeList[i], DiffusionNode.KernelPorts.outSpeed, m_AdvectionNodeList[i], AdvectionNode.KernelPorts.inSpeed);            
         }
 
+        SetViscosity(viscosity);
+        SetDiffusionSpeed(diffusionSpeed);
     }
 
     public void Dispose()
@@ -212,56 +225,57 @@ public class DfgSimulation : FluidSimulationInterface
         {
             m_Set.Destroy(m_AdvectionNodeList[i]);
             m_Set.Destroy(m_DiffusionNodeList[i]);
-            m_Set.ReleaseGraphValue(m_SpeedGraphValues[i]);
             m_Set.ReleaseGraphValue(m_HeightGraphValues[i]);
         }    
 
         m_Set.Destroy(m_UniformNode);
     }
 
-    public void Advection(float volumeToAddPerCell)
+    public void SetViscosity(float viscosity)
     {
-        float deltaT = Time.deltaTime;
+        m_Set.SetData(m_UniformNode, UniformNode.KernelPorts.inViscosity, viscosity);
+    }
 
+    public void SetDiffusionSpeed(float diffusionSpeed)
+    {
+        m_Set.SetData(m_UniformNode, UniformNode.KernelPorts.inDiffusionSpeed, diffusionSpeed);
+    }
+
+    public void ApplyForce(int indexToApply, float force, float mass)
+    {
+        m_Set.SendMessage(m_DiffusionNodeList[indexToApply], DiffusionNode.SimulationPorts.accelerationInput, force / mass);
+    }
+
+    // Phase 1
+    public void ApplyForcesToSimulation(float deltaT)
+    {
+        /*
+        foreach (Force force in forcesToApply)
+        {
+            // TODO: Reduce speed around
+            speedY[force.index] += force.acceleration * deltaT;
+        }
+        */
+    }       
+
+    public void Diffusion(float deltaT)
+    {
+        // Nothing to do, done in DFG
+    }
+
+    // Phase 3
+    public void Advection(float volumeToAddPerCell, float deltaT)
+    {
         // Set uniforms
         m_Set.SetData(m_UniformNode, UniformNode.KernelPorts.inDeltaT, deltaT);
         m_Set.SetData(m_UniformNode, UniformNode.KernelPorts.inVolumeToAdd, volumeToAddPerCell);
-
-        // TODO: Set viscosity/diff speed
-        m_Set.SetData(m_UniformNode, UniformNode.KernelPorts.inViscosity, 0.998f);
-        m_Set.SetData(m_UniformNode, UniformNode.KernelPorts.inDiffusionSpeed, 20.0f);
-
-        for (int i = 0; i < vertices.Length; i++)
-        {
-            m_Set.SetData(m_AdvectionNodeList[i], AdvectionNode.KernelPorts.inSpeed, speed[i]);
-            m_Set.SetData(m_AdvectionNodeList[i], AdvectionNode.KernelPorts.inHeight, vertices[i].y);            
-        }
-
         m_Set.Update();
-    }
-
-    public void Diffusion()
-    {
-        // Nothing to do, done in ECS
     }
 
     public void ApplyToMesh()
     {
         for (int i = 0; i < vertices.Length; i++)
-            vertices[i].y = m_Set.GetValueBlocking(m_SpeedGraphValues[i]);
-
-        for (int i = 0; i < vertices.Length; i++)
-            speed[i] = m_Set.GetValueBlocking(m_HeightGraphValues[i]);
-    }
-
-    public float GetSpeed(int index)
-    {
-        return speed[index];
-    }
-
-    public void SetSpeed(int index, float speed)
-    {
-        this.speed[index] = speed;
-    }
+            vertices[i].y = m_Set.GetValueBlocking(m_HeightGraphValues[i]);
+    }    
 }
 
