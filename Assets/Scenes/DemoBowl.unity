@@ -165,10 +165,11 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 07b78855b956c4c428a14023f3c45a76, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  simulationType: 2
+  useJobs: 1
+  simulationType: 1
   useSurfaceAreaDetection: 1
   generateSkirt: 0
-  gridResolution: 0.1
+  gridResolution: 0.2
   maxRayLength: {x: 5, y: 5, z: 5}
   diffusionSpeed: 20
   viscosity: 0.998
@@ -231,7 +232,7 @@ GameObject:
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
   m_StaticEditorFlags: 0
-  m_IsActive: 1
+  m_IsActive: 0
 --- !u!54 &481837413
 Rigidbody:
   m_ObjectHideFlags: 0
@@ -659,11 +660,12 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 07b78855b956c4c428a14023f3c45a76, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
+  useJobs: 1
   simulationType: 0
   useSurfaceAreaDetection: 0
   generateSkirt: 0
   gridResolution: 0.5
-  maxRayLength: {x: 3, y: 3, z: 3}
+  maxRayLength: {x: 100, y: 100, z: 100}
   diffusionSpeed: 20
   viscosity: 0.998
   simulationIteration: 1
