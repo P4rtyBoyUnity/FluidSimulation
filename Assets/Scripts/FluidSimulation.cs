@@ -3,7 +3,8 @@ using System.Collections.Generic;
 using Unity.Collections;
 using UnityEngine;
 
-/*
+/* 
+ * 
  * DEMONSTRATION
     *  (Floating object, normals control) Rubber Ducky floating
     *  (volume augmentation) Object falling in water (ex: Cube)
@@ -12,9 +13,16 @@ using UnityEngine;
     *  wave splashing on floating objects
     *  Rain
  * PLANE CREATION
- *      Separate plane creation, from sim & objects physic & mouse interaction
+ *      AdjustXContour out!
+ *          maybe we should add a second X min/max value array
  *      Recompute normal in //
  *          or at least recompute normal in a job while computing  physic objects, while processing objects & inputs 
+ *      Skirt
+ *      Bugs de contour
+ *      Lors du rendering on vois des triangles weird (mais pas en scene view)
+ *          - semble etre juste du coté X-
+ *          
+ *      Find limit of mesh and manage multiple meshes
  * DFG
  *  - Protection pour DVG Nb Vertices bug
  *  - experiment using componentNodes
@@ -30,61 +38,56 @@ using UnityEngine;
             - Objects slowdown
         - Consider object mass & volume for floating
         - when detecting surface level, take 5 measures (each bouding box corner + middle?) for object larger than grid
-    - Skirt
     - Create a fixed grid for inital config? (not good for parallel compute)
     - foaming?
-    - skirt!
 */
 
 public class FluidSimulation : MonoBehaviour
 {
-    // 3 Types of simulation right now;
-    // - Reference  : Classic C3 simulation
+    // 4 Types of simulation right now;
+    // - Reference  : Classic code simulation
+    // - Jobs       : Parrallelized classic code simulation
     // - ECS        : DOTS based simulation using ECS
     // - DFG        : Simulation done with Data Flow Graph tech
     public enum SimType { Reference, Jobs, Ecs, Dfg };
-    public bool useJobs = true;
-    public bool debugPushVolume = false;
-
     public SimType simulationType = SimType.Reference;
-    public bool useSurfaceAreaDetection = false;
+
+    public enum SimSurfaceType { Rectangle, DetectPlane };
+    public SimSurfaceType surfaceType = SimSurfaceType.Rectangle;
+
     public bool generateSkirt = false;
     public float gridResolution = 0.5f;
     public Vector3 maxRayLength = new Vector3(100.0f, 100.0f, 100.0f);
     public float diffusionSpeed = 20.0f;
     public float viscosity = 0.998f;
     public uint simulationIteration = 1;
+    public bool debugPushVolume = false;
+    public List<FluidSimEffect> physicEffects = new List<FluidSimEffect>();
 
     // Sim Data
     private FluidSimulationInterface simulation = null;
-    private float halfResolution = 0.0f;
+    private float halfGridResolution = 0.0f;
+    private float gridResolutionSquare = 0.0f;
     private Vector3 boundingBoxMin;
     private Vector3 boundingBoxMax;
-    private int simStripCount = 0;
-    private int simSize = 0;
-    private int maxStripSize = 0;
-    private float totalVolume = 0.0f;
+    private float initialTotalVolume = 0.0f;
 
     // Array length == Nb X Values
-    private float[] backLimitList = new float[0];
-    private float[] frontLimitList = new float[0];
-    private int[] stripToVerticeLocalOfs = new int[0];
-    private int[] stripToVerticeGlobalOfs = new int[0];
-    private int[] stripToVerticeCount = new int[0];
+    private SurfaceDelimitation[]   surfaceLimits = null;
+    private SimDataQuad             simData = null;
+    private NativeArray<Vector3>    simVertices;
 
-    // Array Length == Nb Vertex/Values Total
-    private NativeArray<Vector3> simVertices;
-    private Neighbor[] neighbor = new Neighbor[0];
+    private Mesh                    deformingMesh;
 
-    private Mesh deformingMesh;
-    private BoxCollider simCollider;
+    // temp
+    public  BoxCollider             simCollider;
 
     // Debug
-    private List<GameObject> debugItemToDelete = new List<GameObject>();
-    private List<GameObject> debugItemLastFrame = new List<GameObject>();
+    private List<GameObject>        debugItemToDelete = new List<GameObject>();
+    private List<GameObject>        debugItemLastFrame = new List<GameObject>();
 
     // Floating objects
-    class PhysicObject
+    public class PhysicObject
     {
         public GameObject gao;
         public Vector3 massCenterDelta;
@@ -105,54 +108,44 @@ public class FluidSimulation : MonoBehaviour
     // Start is called before the first frame update
     void Start()
     {
-        halfResolution = gridResolution / 2.0f;
+        halfGridResolution = gridResolution / 2.0f;
+        gridResolutionSquare = gridResolution * gridResolution;
 
-        if (useSurfaceAreaDetection)
-        {
-            // Check limit on the right (X+) & left (X-) side            
-            RaycastHit hit;
-            boundingBoxMin.x = CastRay(new Ray(transform.position, Vector3.left), maxRayLength.x, out hit) ? hit.point.x : transform.position.x - maxRayLength.x;
-            boundingBoxMax.x = CastRay(new Ray(transform.position, Vector3.right), maxRayLength.x, out hit) ? hit.point.x : transform.position.x + maxRayLength.x;
-            boundingBoxMin.y = CastRay(new Ray(transform.position, Vector3.down), maxRayLength.y, out hit) ? hit.point.y : transform.position.y - maxRayLength.y;
-            boundingBoxMax.y = transform.position.y;
-
-            // Along the ine inbetween leftHit & rightHit, project rays on each side toward Z- & Z+, at resolution distance
-            // and fill backLimitList, frontLimitList with the results
-            Vector3 leftHit = transform.position;
-            leftHit.x = boundingBoxMin.x;
-            ComputeZSurface(leftHit, boundingBoxMax.x - boundingBoxMin.x, maxRayLength.z, gridResolution, out backLimitList, out frontLimitList);
-
-            // Compute Bounding box in z            
-            boundingBoxMin.z = backLimitList[0];
-            boundingBoxMax.z = frontLimitList[0];
-            for (int i = 1; i < backLimitList.Length; i++)
-            {
-                boundingBoxMin.z = Mathf.Min(boundingBoxMin.z, backLimitList[i]);
-                boundingBoxMax.z = Mathf.Max(boundingBoxMax.z, frontLimitList[i]);
-            }
-        }
+        SurfaceCreationBase surfaceFactory;
+        if (surfaceType == SimSurfaceType.DetectPlane)
+            surfaceFactory = new SurfaceCreationRayCast();
         else
-        {
-            // The surface is a rectangle defined by maxRayLengthX & maxRayLengthZ            
-            boundingBoxMin = transform.position - maxRayLength;
-            boundingBoxMax = transform.position + maxRayLength;
-            boundingBoxMax.y = transform.position.y;
-            int LimitListLength = 1 + Mathf.CeilToInt((boundingBoxMax.x - boundingBoxMin.x) / gridResolution);
-            backLimitList = new float[LimitListLength];
-            frontLimitList = new float[LimitListLength];
-            for (int i = 0; i < LimitListLength; i++)
-            {
-                backLimitList[i] = boundingBoxMin.z;
-                frontLimitList[i] = boundingBoxMax.z;
-            }
-        }
+            surfaceFactory = new SurfaceCreationQuad();
 
-        CreateSimData();
+        // Create surface
+        surfaceLimits = surfaceFactory.DetectSurface(transform.position, maxRayLength, gridResolution, out boundingBoxMin, out boundingBoxMax);
 
-        CreateSurface();
+        // Create the simulation data
+        simData = new SimDataQuad(transform.position, gridResolution, boundingBoxMin, boundingBoxMax,surfaceLimits);
+
+        MeshFilter meshFilter = GetComponent<MeshFilter>();
+        if (!meshFilter)
+            meshFilter = gameObject.AddComponent<MeshFilter>();
+
+        // Create the mesh
+        deformingMesh = simData.CreateSurface(surfaceLimits, out simVertices);
+
+        // Adjust X side contours for adjusted planes
+        if (surfaceType == SimSurfaceType.DetectPlane)
+            AdjustXContour();
+
+        // Computes UVs (they need to be done AFTER adjustment)
+        deformingMesh.uv = simData.ComputeUVs(simVertices);
+
+        meshFilter.mesh = deformingMesh;
+        meshFilter.transform.position = boundingBoxMin;
+
+        // Create collider
+        simCollider = gameObject.AddComponent<BoxCollider>();
+        simData.SetBoxCollider(transform.position, ref simCollider);
 
         // Compute volume
-        totalVolume = ComputeVolume();
+        initialTotalVolume = ComputeVolume();
 
         /*
         Debug.Log("---------------------------------------------------------");
@@ -165,13 +158,13 @@ public class FluidSimulation : MonoBehaviour
         */
 
         if (simulationType == SimType.Jobs)
-            simulation = new JobFluidSimulation(neighbor, ref simVertices);
+            simulation = new JobFluidSimulation(simData.neighbor, ref simVertices);
         if (simulationType == SimType.Ecs)
-            simulation = new EcsSimulation(neighbor, ref simVertices, totalVolume / (gridResolution * gridResolution));
+            simulation = new EcsSimulation(simData.neighbor, ref simVertices, initialTotalVolume / gridResolutionSquare);
         else if (simulationType == SimType.Dfg)
-            simulation = new DfgSimulation(neighbor, ref simVertices);
+            simulation = new DfgSimulation(simData.neighbor, ref simVertices);
         else
-            simulation = new ReferenceFluidSimulation(neighbor, ref simVertices);
+            simulation = new ReferenceFluidSimulation(simData.neighbor, ref simVertices);
     }
 
     // Update is called once per frame
@@ -182,7 +175,7 @@ public class FluidSimulation : MonoBehaviour
         for (uint i = 0; i < simulationIteration; i++)
         {
             UnityEngine.Profiling.Profiler.BeginSample("Simulation");
-            simulation.Simulate(ComputeTargetVolume() / (gridResolution * gridResolution), diffusionSpeed, viscosity, deltaT);
+            simulation.Simulate(ComputeTargetVolume() / gridResolutionSquare, diffusionSpeed, viscosity, deltaT);
             UnityEngine.Profiling.Profiler.EndSample();
         }
 
@@ -192,10 +185,6 @@ public class FluidSimulation : MonoBehaviour
 
         UnityEngine.Profiling.Profiler.BeginSample("Physic objects");
         UpdateFloatingObjects();
-        UnityEngine.Profiling.Profiler.EndSample();
-
-        UnityEngine.Profiling.Profiler.BeginSample("Process inputs");
-        ProcessInputs();
         UnityEngine.Profiling.Profiler.EndSample();
 
         UnityEngine.Profiling.Profiler.BeginSample("Update Vertices");
@@ -237,7 +226,8 @@ public class FluidSimulation : MonoBehaviour
     public void DisplaceVolume(Vector3 pos, float volume)
     {
         int index = GetArrayIndexFromPos(pos);
-        simVertices[index] = simVertices[index] + Vector3.up * volume;
+        if (index != -1)
+            simVertices[index] = simVertices[index] + Vector3.up * volume;
 
         if (debugPushVolume)
         {
@@ -247,31 +237,7 @@ public class FluidSimulation : MonoBehaviour
             debugItemToDelete.Add(sphere);
         }
     }
-
-    private void ProcessInputs()
-    {
-        if (Input.GetMouseButton(0))
-        {
-            Ray ray = Camera.main.ScreenPointToRay(Input.mousePosition);
-            RaycastHit hit;
-
-            if (simCollider)
-            {
-                simCollider.enabled = true;
-                if (simCollider.Raycast(ray, out hit, 100))
-                {
-                    int index = GetArrayIndexFromPos(hit.point);
-                    /*
-                    if (index != -1)
-                        simulation.SetSpeed(index, simulation.GetSpeed(index) - 50.0f * Time.deltaTime);
-                        */
-                    if (index != -1)
-                        simulation.ApplyForce(index, -30.0f, 1.0f);
-                }
-                simCollider.enabled = false;
-            }
-        }
-    }
+       
 
     private void RecalculateNormals()
     {
@@ -341,332 +307,22 @@ public class FluidSimulation : MonoBehaviour
     }
 
     void UpdateFloatingObjects()
-    {
+    {        
+        // Add unique index to struct
         for (int i = 0; i < physicObjects.Count; i++)
-        {
-            // PARAMS FOR OBJECTS
-            // How much they are in the water
-            // How fast they rotate
-            float y;
-            Vector3 normal = GetYNormal(physicObjects[i].gao.transform.position.x, physicObjects[i].gao.transform.position.z, out y);
-
-            var rigidBody = physicObjects[i].gao.GetComponent<Rigidbody>();
-            if (rigidBody)
-            {
-                /*
-                rigidBody.isKinematic = true;                
-                physicObjects[i].transform.position = new Vector3(physicObjects[i].transform.position.x, y, physicObjects[i].transform.position.z);
-                physicObjects[i].transform.rotation = Quaternion.FromToRotation(Vector3.up, normal);
-                */
-
-
-                if (y > 0.0f)
-                {
-                    float mv = physicObjects[i].volume / rigidBody.mass;
-
-                    float height = 0.0f;
-                    var objCollider = physicObjects[i].gao.GetComponent<Collider>();
-                    if (objCollider)
-                        height = objCollider.bounds.size.y;
-
-                    //Debug.Log("Mass=" + rigidBody.mass + ", volume=" + physicObjects[i].volume + ", mv=" + mv + ", height = " + height);
-
-                    float PercentageInFluid = 1.0f - (physicObjects[i].gao.transform.position.y - y + (height / 2.0f)) / height;
-                    float Ratio = 1.0f - physicObjects[i].gao.transform.position.y / y;
-
-                    //Debug.Log("pos = " + physicObjects[i].gao.transform.position.y + ", y=" + y + ", Ratio = " + Ratio + ", Height=" + PercentageInFluid);
-
-                    // compute mass in fluid 
-                    float massInsideFluid = PercentageInFluid * physicObjects[i].volume;  //1.0 = liquid vm
-                    float massOutsideFluid = (1.0f - PercentageInFluid) * rigidBody.mass;
-                    float archimedRatio = massInsideFluid / (massInsideFluid + massOutsideFluid);
-                    
-                    // Update submerged volume
-                    float newSubmergedVolume = PercentageInFluid * physicObjects[i].volume;
-                    float deltaSubmergedVolume = newSubmergedVolume - physicObjects[i].submergedVolume;
-                    physicObjects[i].submergedVolume = newSubmergedVolume;
-
-                    //Debug.Log("Mass in fluid=" + massInsideFluid + ", Mass outside fluid= " + massOutsideFluid + ", ArchiRatio=" + archimedRatio + ", Volume=" + physicObjects[i].volume);
-
-                    // submerge volume effect
-                    int index = GetArrayIndexFromPos(physicObjects[i].gao.transform.position);
-                    /*
-                    if (index >= 0)
-                        speedY[index] += deltaSubmergedVolume * 2.0f;
-                    */
-
-                    /* physic effect temporarily removed 
-                    if(index >= 0)
-                        simulation.SetSpeed(index, simulation.GetSpeed(index) + deltaSubmergedVolume * 2.0f);
-
-                    rigidBody.AddForce((0.2f * archimedRatio * mv * normal * Physics.gravity.magnitude), ForceMode.Force);
-                    if (rigidBody.velocity.y < 0.0f)
-                        rigidBody.velocity = rigidBody.velocity * 0.98f;
-                        */
-
-                    /*
-                    if (Ratio > 0.0f)
-                    {
-                        rigidBody.AddForce(mv * normal * Physics.gravity.magnitude * (0.25f + Ratio * 0.25f), ForceMode.Force);
-                        if (rigidBody.velocity.y < 0.0f)
-                            rigidBody.velocity = rigidBody.velocity * 0.98f;
-                    }
-                    */
-                }
-
-                /*
-                objectsSpeed[i] = (objectsSpeed[i] + normal) * 0.95f;
-                Vector3 Dest = floatingObjects[i].transform.position + objectsSpeed[i] * Time.deltaTime;
-                Dest.y = y;
-                floatingObjects[i].transform.position = Vector3.Lerp(floatingObjects[i].transform.position, Dest, 0.3f);
-                floatingObjects[i].transform.rotation = Quaternion.RotateTowards(floatingObjects[i].transform.rotation, Quaternion.FromToRotation(Vector3.up, normal), 0.3f);
-                */
-
-            }
-            else
-            {
-                physicObjects[i].gao.transform.position = new Vector3(physicObjects[i].gao.transform.position.x, y, physicObjects[i].gao.transform.position.z);
-                physicObjects[i].gao.transform.rotation = Quaternion.FromToRotation(Vector3.up, normal);
-            }
-        }
+            foreach (var effect in physicEffects)
+                effect.UpdateBehavior(this, physicObjects[i]);
     }
-
-    /// <summary>
-    /// Create 2 arrays for minZ/maxZ, which cover the XoZ surface, starting from StartX point, to StartX.x + lengthX. 
-    /// Rays are projected at every [resolution] interval along the X axis.
-    /// </summary>
-    /// <param name="StartX"></param>The starting point of the surface in X
-    /// <param name="lengthX"></param>The X length of the surface
-    /// <param name="maxZDistance"></param>The maximum distance to project rays in the Z axis
-    /// <param name="resolution"></param>The resolution inbetween 2 rays along the X axis
-    /// <param name="minZArray"></param>Output value; list of detected collisions toward Z-
-    /// <param name="maxZArray"></param>Output value; list of detected collisions toward Z+
-    /// <returns></returns>
-    int ComputeZSurface(Vector3 StartX, float lengthX, float maxZDistance, float resolution, out float[] minZArray, out float[] maxZArray)
-    {
-        int LimitListLength = 1 + Mathf.CeilToInt(lengthX / resolution);
-
-        minZArray = new float[LimitListLength];
-        maxZArray = new float[LimitListLength];
-
-        Vector3 indexPos = StartX;
-        for (int i = 1; i < LimitListLength - 1; i++)
-        {
-            indexPos.x = StartX.x + Mathf.Min((float)i * resolution, lengthX);
-
-            RaycastHit hit;
-            minZArray[i] = CastRay(new Ray(indexPos, Vector3.back), maxZDistance, out hit) ? hit.point.z : indexPos.z - maxZDistance;
-            maxZArray[i] = CastRay(new Ray(indexPos, Vector3.forward), maxZDistance, out hit) ? hit.point.z : indexPos.z + maxZDistance;
-        }
-
-        minZArray[0] = minZArray[1];
-        maxZArray[0] = maxZArray[1];
-        minZArray[LimitListLength - 1] = minZArray[LimitListLength - 2];
-        maxZArray[LimitListLength - 1] = maxZArray[LimitListLength - 2];
-
-        return LimitListLength;
-    }
-
-    void CreateSimData()
-    {
-        simStripCount = backLimitList.Length;
-
-        stripToVerticeGlobalOfs = new int[simStripCount];
-        stripToVerticeLocalOfs = new int[simStripCount];
-        stripToVerticeCount = new int[simStripCount];
-
-        int referenceOfs = Mathf.CeilToInt((transform.position.z - boundingBoxMin.z - halfResolution) / gridResolution);
-
-        // Evaluate each strip
-        simSize = 0;
-        maxStripSize = 0;
-        for (int i = 0; i < simStripCount; i++)
-        {
-            float backZ = backLimitList[i];
-            float frontZ = frontLimitList[i];
-
-            if (i > 0)
-            {
-                backZ = Mathf.Min(backZ, backLimitList[i - 1]);
-                frontZ = Mathf.Max(frontZ, frontLimitList[i - 1]);
-            }
-            if (i < simStripCount - 1)
-            {
-                backZ = Mathf.Min(backZ, backLimitList[i + 1]);
-                frontZ = Mathf.Max(frontZ, frontLimitList[i + 1]);
-            }
-
-            int nbBackPoints = Mathf.CeilToInt((transform.position.z - backZ - halfResolution) / gridResolution);
-            int nbFrontPoints = Mathf.CeilToInt((frontZ - transform.position.z - halfResolution) / gridResolution);
-
-            stripToVerticeLocalOfs[i] = referenceOfs - nbBackPoints;
-            stripToVerticeGlobalOfs[i] = simSize;
-            stripToVerticeCount[i] = nbBackPoints + nbFrontPoints + 2;
-            simSize += stripToVerticeCount[i];
-
-            maxStripSize = Mathf.Max(maxStripSize, stripToVerticeLocalOfs[i] + stripToVerticeCount[i]);
-        }
-
-        /*
-        for (int i = 0; i < simStripCount; i++)
-            Debug.Log("Strip " + i + " : Ofs=" + stripToVerticeGlobalOfs[i] + ", Count=" + stripToVerticeCount[i] + ", LocalOfs=" + stripToVerticeLocalOfs[i]);
-        */
-
-        // Allocate for the whole sim
-        // Array Length == Nb Vertex/Values Total
-        //speedY = new float[simSize];
-        neighbor = new Neighbor[simSize];
-
-        // Init sim
-        for (int x = 0; x < simStripCount; x++)
-        {
-            for (int z = 0; z < maxStripSize; z++)
-            {
-                int index = GetVerticeIndex(x, z);
-                if (index >= 0)
-                {
-                    neighbor[index].prevZ = GetVerticeIndex(x, z - 1, index);
-                    neighbor[index].nextZ = GetVerticeIndex(x, z + 1, index);
-                    neighbor[index].prevX = GetVerticeIndex(x - 1, z, index);
-                    neighbor[index].nextX = GetVerticeIndex(x + 1, z, index);
-                    //Debug.Log("index " + index + " = " + prevIndexZ[index] + ", " + nextIndexZ[index] + ", " + prevIndexX[index] + ", " + nextIndexX[index]);
-                }
-            }
-        }
-
-        for (int x = 0; x < simStripCount; x++)
-        {
-            for (int z = 0; z < maxStripSize; z++)
-            {
-                int index = GetVerticeIndex(x, z);
-                if (index >= 0)
-                {
-                    if ((neighbor[index].prevZ != index) && (neighbor[index].prevZ != neighbor[index].nextZ))
-                        neighbor[index].prevZ = GetVerticeIndex(x, z - 1, index);
-                    neighbor[index].nextZ = GetVerticeIndex(x, z + 1, index);
-                    neighbor[index].prevX = GetVerticeIndex(x - 1, z, index);
-                    neighbor[index].nextX = GetVerticeIndex(x + 1, z, index);
-                }
-            }
-        }
-    }
-
-    void CreateSurface()
-    {
-        simVertices = new NativeArray<Vector3>(simSize, Allocator.Persistent);
-        Vector2[] uvs = new Vector2[simSize];
-        int[] triangles = new int[simSize * 6];
-
-        int triangleIndex = 0;
-        Vector3 halfBoundingBoxSize = boundingBoxMin;
-
-        for (int x = 0; x < simStripCount; x++)
-        {
-            for (int z = 0; z < maxStripSize; z++)
-            {
-                int index = GetVerticeIndex(x, z);
-                if (index >= 0)
-                {
-                    // Set Vertex
-                    Vector3 vector = GetVertexLocalPos(x, z);
-                    // Adjust tight contour
-                    vector.z = Mathf.Clamp(vector.z, backLimitList[x] - boundingBoxMin.z, frontLimitList[x] - boundingBoxMin.z);
-
-                    simVertices[index] = vector;
-
-                    //////////// DEBUG
-                    /*
-                    GameObject sphere = GameObject.CreatePrimitive(PrimitiveType.Sphere);
-                    Vector3 spherePos = vector;
-                    spherePos.y = transform.position.y;
-                    sphere.transform.position = spherePos;
-                    sphere.transform.localScale = sphere.transform.localScale * 0.1f;
-                    */
-                    ///////////////
-
-                    // Set Triangles
-                    int nextXindex = GetVerticeIndex(x + 1, z);
-                    int nextZindex = GetVerticeIndex(x, z + 1);
-                    int nextXZindex = GetVerticeIndex(x + 1, z + 1);
-
-                    if ((nextXindex != -1) && (nextZindex != -1) && (nextXZindex != -1))
-                    {
-                        triangles[triangleIndex++] = index;
-                        triangles[triangleIndex++] = nextZindex;
-                        triangles[triangleIndex++] = nextXZindex;
-
-                        triangles[triangleIndex++] = index;
-                        triangles[triangleIndex++] = nextXZindex;
-                        triangles[triangleIndex++] = nextXindex;
-                    }
-                }
-            }
-        }
-
-        if (useSurfaceAreaDetection)
-            AdjustXContour();
-
-        // computes UVs
-        for (int x = 0; x < simStripCount; x++)
-        {
-            for (int z = 0; z < maxStripSize; z++)
-            {
-                int index = GetVerticeIndex(x, z);
-                if (index >= 0)
-                {
-                    // SetUV
-                    uvs[index].x = simVertices[index].x / (float)(simStripCount - 1);
-                    uvs[index].y = simVertices[index].z / (float)(maxStripSize - 1);
-                }
-            }
-
-        }
-
-        // Create the mesh!
-        MeshFilter meshFilter = GetComponent<MeshFilter>();
-        if (!meshFilter)
-            meshFilter = gameObject.AddComponent<MeshFilter>();
-
-        deformingMesh = new Mesh();
-        deformingMesh.vertices = simVertices.ToArray();
-        deformingMesh.uv = uvs;
-        deformingMesh.triangles = triangles;
-        deformingMesh.RecalculateNormals();
-        meshFilter.mesh = deformingMesh;                
-        meshFilter.transform.position = boundingBoxMin;
-
-        ///////////// DEBUG
-        /*
-        GameObject cube = GameObject.CreatePrimitive(PrimitiveType.Cube);
-        cube.transform.position = (boundingBoxMin + boundingBoxMax) / 2.0f;
-        cube.transform.localScale = boundingBoxMax - boundingBoxMin;
-
-        Debug.Log("Debug box = " + boundingBoxMin + " - " + boundingBoxMax);
-        Debug.Log("Mesh Filter = " + meshFilter.transform.position);
-        Debug.Log("Transform   = " + transform.position);
-        Debug.Log("Cube        = Pos:" + cube.transform.position + ", Scale:" + cube.transform.localScale);
-        */
-        //////////
-
-        // Create collider
-        simCollider = gameObject.AddComponent<BoxCollider>();
-        Vector3 center = (boundingBoxMin + boundingBoxMax) / 2.0f;
-        simCollider.center = center - transform.position;
-        simCollider.size = boundingBoxMax - boundingBoxMin;
-        simCollider.size = new Vector3(Mathf.Abs(simCollider.size.x), Mathf.Abs(simCollider.size.y), Mathf.Abs(simCollider.size.z));
-        simCollider.isTrigger = true;
-
-    }
-
+    
     void AdjustXContour()
     {
-        for (int i = 1; i < stripToVerticeCount[0] - 1; i++)
+        for (int i = 1; i < simData.stripToVerticeData[0].count - 1; i++)
         {
-            int z = i + stripToVerticeLocalOfs[0];
-            int index = GetVerticeIndex(0, z);
+            int z = i + simData.stripToVerticeData[0].localOffset;
+            int index = simData.GetVerticeIndex(0, z);
             if (index >= 0)
             {
-                int indexOrig = GetVerticeIndex(1, z);
+                int indexOrig = simData.GetVerticeIndex(1, z);
                 if (indexOrig >= 0)
                 {
                     Vector3 origPos = GetVertexGlobalPos(1, z);
@@ -677,16 +333,16 @@ public class FluidSimulation : MonoBehaviour
             }
         }
 
-        for (int i = 1; i < stripToVerticeCount[simStripCount - 1] - 1; i++)
+        for (int i = 1; i < simData.stripToVerticeData[simData.stripToVerticeData.Length - 1].count - 1; i++)
         {
-            int z = i + stripToVerticeLocalOfs[simStripCount - 1];
-            int index = GetVerticeIndex(simStripCount - 1, z);
+            int z = i + simData.stripToVerticeData[simData.stripToVerticeData.Length - 1].localOffset;
+            int index = simData.GetVerticeIndex(simData.stripToVerticeData.Length - 1, z);
             if (index >= 0)
             {
-                int indexOrig = GetVerticeIndex(simStripCount - 2, z);
+                int indexOrig = simData.GetVerticeIndex(simData.stripToVerticeData.Length - 2, z);
                 if (indexOrig >= 0)
                 {
-                    Vector3 origPos = GetVertexGlobalPos(simStripCount - 2, z);
+                    Vector3 origPos = GetVertexGlobalPos(simData.stripToVerticeData.Length - 2, z);
                     RaycastHit hit;
                     if (CastRay(new Ray(origPos, Vector3.right), gridResolution, out hit))
                         simVertices[index] = new Vector3(hit.point.x - boundingBoxMin.x, simVertices[index].y, simVertices[index].z);
@@ -695,14 +351,14 @@ public class FluidSimulation : MonoBehaviour
         }
 
         // AdjustXContour top and bottom z to the raycast extermes
-        int stripOfs = stripToVerticeGlobalOfs[0];
-        int stripOfs2 = stripToVerticeCount[stripOfs] - 1;
+        int stripOfs = simData.stripToVerticeData[0].globalOffset;
+        int stripOfs2 = simData.stripToVerticeData[stripOfs].count - 1;
         simVertices[stripOfs] = new Vector3(gridResolution, simVertices[stripOfs].y, simVertices[stripOfs].z);        
         simVertices[stripOfs2] = new Vector3(gridResolution, simVertices[stripOfs2].y, simVertices[stripOfs2].z);
 
-        stripOfs = stripToVerticeGlobalOfs[simStripCount - 1];
-        stripOfs2 = stripOfs + stripToVerticeCount[simStripCount - 1] - 1;
-        float rightPos = gridResolution * (float)(simStripCount - 2);
+        stripOfs = simData.stripToVerticeData[simData.stripToVerticeData.Length - 1].globalOffset;
+        stripOfs2 = stripOfs + simData.stripToVerticeData[simData.stripToVerticeData.Length - 1].count - 1;
+        float rightPos = gridResolution * (float)(simData.stripToVerticeData.Length - 2);
         simVertices[stripOfs] = new Vector3(rightPos, simVertices[stripOfs].y, simVertices[stripOfs].z);        
         simVertices[stripOfs2] = new Vector3(rightPos, simVertices[stripOfs2].y, simVertices[stripOfs2].z);
     }
@@ -712,15 +368,15 @@ public class FluidSimulation : MonoBehaviour
         float result = 0.0f;
 
         // Compute all columns
-        for (int i = 0; i < simSize; i++)
+        for (int i = 0; i < simData.simSize; i++)
             result += simVertices[i].y;
 
-        return result * gridResolution * gridResolution;
+        return result * gridResolutionSquare;
     }
 
     float ComputeTargetVolume()
     {
-        float targetVolume = totalVolume;
+        float targetVolume = initialTotalVolume;
 
         // Add up all submerged objects
         foreach (var obj in physicObjects)
@@ -729,7 +385,7 @@ public class FluidSimulation : MonoBehaviour
         return targetVolume;
     }       
 
-    Vector3 GetYNormal(float x, float z, out float y)
+    public Vector3 GetYNormal(float x, float z, out float y)
     {
         float wx1, wz1;
         int y11Index = GetArrayIndexFromPos(x, z, out wx1, out wz1);
@@ -742,9 +398,9 @@ public class FluidSimulation : MonoBehaviour
             return Vector3.up;
         }
 
-        int y12Index = neighbor[y11Index].nextZ;
-        int y21Index = neighbor[y11Index].nextX;
-        int y22Index = neighbor[y21Index].nextX; ;
+        int y12Index = simData.neighbor[y11Index].nextZ;
+        int y21Index = simData.neighbor[y11Index].nextX;
+        int y22Index = simData.neighbor[y21Index].nextX;
 
         float y11 = simVertices[y11Index].y;
         float y12 = simVertices[y12Index].y;
@@ -759,7 +415,7 @@ public class FluidSimulation : MonoBehaviour
     // Return a local position relative to boundingBoxMin, from a (x, z) couple
     Vector3 GetVertexLocalPos(int x, int z)
     {
-        return new Vector3((float)x * gridResolution, boundingBoxMax.y - boundingBoxMin.y, (float)z * gridResolution - halfResolution);
+        return new Vector3((float)x * gridResolution, boundingBoxMax.y - boundingBoxMin.y, (float)z * gridResolution - halfGridResolution);
     }
 
     // Return a global position from a (x, z) couple
@@ -768,39 +424,37 @@ public class FluidSimulation : MonoBehaviour
         return boundingBoxMin + GetVertexLocalPos(x, z);
     }
 
-    // Return an index, based on a local int position
-    // return defaultVal if (x, z) is outside bound or doesn't have simulation point
-    int GetVerticeIndex(int x, int z, int defaultVal = -1)
-    {
-        if ((x < 0) || (x >= simStripCount))
-            return defaultVal;
-        if ((z < stripToVerticeLocalOfs[x]) || (z >= (stripToVerticeLocalOfs[x] + stripToVerticeCount[x])))
-            return defaultVal;
-        return stripToVerticeGlobalOfs[x] + z - stripToVerticeLocalOfs[x];
-    }
-
     // Return an array index based on world position
-    int GetArrayIndexFromPos(Vector3 worldPos)
+    public int GetArrayIndexFromPos(Vector3 worldPos)
     {
-        int x = (int)((worldPos.x - boundingBoxMin.x + gridResolution / 2.0f) / gridResolution);
-        int z = (int)((worldPos.z - boundingBoxMin.z + gridResolution / 2.0f) / gridResolution);
-        return GetVerticeIndex(x, z);
+        int x = (int)((worldPos.x - boundingBoxMin.x + halfGridResolution) / gridResolution);
+        int z = (int)((worldPos.z - boundingBoxMin.z + halfGridResolution) / gridResolution);
+        return simData.GetVerticeIndex(x, z);
     }
 
     int GetArrayIndexFromPos(float px, float pz, out float weightX, out float weightZ)
     {
-        float x = (int)((px - boundingBoxMin.x + gridResolution / 2.0f) / gridResolution);
-        float z = (int)((pz - boundingBoxMin.z + gridResolution / 2.0f) / gridResolution);
+        float x = (int)((px - boundingBoxMin.x + halfGridResolution) / gridResolution);
+        float z = (int)((pz - boundingBoxMin.z + halfGridResolution) / gridResolution);
         weightX = 1.0f - Mathf.Repeat(x, 1.0f);
         weightZ = 1.0f - Mathf.Repeat(x, 1.0f);
-        return GetVerticeIndex((int)x, (int)z);
+        return simData.GetVerticeIndex((int)x, (int)z);
     }
 
     void AddNewGameObject(GameObject obj)
     {
         Vector3 massCenterDelta;
         float objVolume = EvaluateObjectVolume(obj, out massCenterDelta);
-        physicObjects.Add(new PhysicObject { gao = obj, volume = objVolume, massCenterDelta = massCenterDelta });
+        var newPhysicObject = new PhysicObject { gao = obj, volume = objVolume, massCenterDelta = massCenterDelta };
+
+        bool addPhysicObject = true;
+        for (int i = 0; i < physicObjects.Count; i++)
+            foreach (var effect in physicEffects)
+                addPhysicObject &= effect.OnFluidSimContact(this, physicObjects[i]);
+
+        if(addPhysicObject)
+            physicObjects.Add(newPhysicObject);
+
     }
 
     float EvaluateObjectVolume(GameObject obj, out Vector3 massCenterDelta)

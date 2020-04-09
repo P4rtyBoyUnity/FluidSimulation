@@ -2,7 +2,7 @@
 using System.Collections.Generic;
 using UnityEngine;
 
-public class BoatPiloting : MonoBehaviour
+public class FluidSimBoatPiloting : MonoBehaviour
 {
     public FluidSimulation  fluidSim = null;
     public Vector3          wakePos = Vector3.right * 5.0f + Vector3.up;
