@@ -5,13 +5,18 @@ using UnityEngine;
 
 /* 
  * 
+ * Rubber ducky for demo
+ * Volume augmentation with key
+ * surface area for mousinteraction
+ * Skirt
+ * 
+ * 
  * DEMONSTRATION
     *  (Floating object, normals control) Rubber Ducky floating
     *  (volume augmentation) Object falling in water (ex: Cube)
     *  Topology change; walls
     *  Handling of different bottoms (splashing on walls until the water is above the wall)
     *  wave splashing on floating objects
-    *  Rain
  * PLANE CREATION
  *      AdjustXContour out!
  *          maybe we should add a second X min/max value array
