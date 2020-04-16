@@ -7,12 +7,12 @@ using UnityEngine;
 
 // This class contains the simulation data for a surface composed of quads
 public class SimDataQuad
-{
+{    
     public struct StripData
     {
-        public int localOffset;
-        public int globalOffset;
-        public int count;
+        public int localOffset;         // Nb of sim points not in simulation
+        public int globalOffset;        // Straing sim point index
+        public int count;               // Nb of sim points in the strip
     }
 
     public StripData[] stripToVerticeData { get; private set; } = new StripData[0];
@@ -124,9 +124,9 @@ public class SimDataQuad
         return stripToVerticeData[x].globalOffset + z - stripToVerticeData[x].localOffset;
     }
 
-    public Mesh CreateSurface(SurfaceDelimitation[] surfaceLimits, out NativeArray<Vector3> simVertices, bool debugSurface = false)
+    public Mesh CreateSurface([ReadOnly] SurfaceDelimitation[] surfaceLimits, out NativeArray<Vector3> simVertices, bool debugSurface = false)
     {
-        // Only pos used = pos.y        
+        // Only pos used = pos.y
         simVertices = new NativeArray<Vector3>(simSize, Allocator.Persistent);
         int[] triangles = new int[simSize * 6];
 
@@ -207,8 +207,33 @@ public class SimDataQuad
         ///
         return deformingMesh;
     }
-    
-    public Vector2[] ComputeUVs(NativeArray<Vector3> simVertices)
+
+    public int[] GetContourIndex([ReadOnly] SurfaceDelimitation[] surfaceLimits)
+    {
+        int lastStripIndex = stripToVerticeData.Length - 1;
+        int[] result = new int[stripToVerticeData.Length * 2 + stripToVerticeData[0].count + stripToVerticeData[lastStripIndex].count];
+        
+        int index = 0;
+        for (int i = 0; i < stripToVerticeData.Length; i++)
+            result[index++] = stripToVerticeData[0].globalOffset;
+        for (int i = 0; i < stripToVerticeData[lastStripIndex].count; i++)
+            result[index++] = stripToVerticeData[lastStripIndex].globalOffset + i;
+        for (int i = 0; i < stripToVerticeData.Length; i++)
+            result[index++] = stripToVerticeData[lastStripIndex - i].globalOffset;
+        for (int i = 0; i < stripToVerticeData[0].count; i++)
+            result[index++] = stripToVerticeData[0].globalOffset + stripToVerticeData[0].globalOffset - 1 - i;
+
+        return result;
+    }
+
+    public enum TextureTilingType
+    {
+        Stretch,
+        Tile,
+        Random
+    };
+
+    public Vector2[] ComputeUVs(NativeArray<Vector3> simVertices, TextureTilingType tiling = TextureTilingType.Tile)
     {
         Vector2[] uvs = new Vector2[simSize];
 
@@ -220,8 +245,22 @@ public class SimDataQuad
                 if (index >= 0)
                 {
                     // SetUV
-                    uvs[index].x = simVertices[index].x / (float)(stripToVerticeData.Length - 1);
-                    uvs[index].y = simVertices[index].z / (float)(maxStripSize - 1);
+                    if (tiling == TextureTilingType.Stretch)
+                    {
+                        uvs[index].x = simVertices[index].x / (float)(stripToVerticeData.Length - 1);
+                        uvs[index].y = simVertices[index].z / (float)(maxStripSize - 1);
+                    }
+                    else if (tiling == TextureTilingType.Random)
+                    {
+                        uvs[index].x = Random.Range(0.0f, 1.0f);
+                        uvs[index].y = Random.Range(0.0f, 1.0f);
+                    }
+                    else
+                    {
+                        uvs[index].x = x & 0x1;
+                        uvs[index].y = z & 0x1;
+                    }                   
+
                 }
             }
         }

@@ -4,12 +4,17 @@ using Unity.Collections;
 using UnityEngine;
 
 /* 
- * 
+ * A way to highligt vertex (color would be nice)
  * Rubber ducky for demo
  * Volume augmentation with key
  * surface area for mousinteraction
  * Skirt
  * 
+ * TODO:
+ * transfertRate = diffusionSpeed * dt = c2/h2 * dT
+ * Upper limit for choice of wave speed : c < h /Δt
+ * Upper limit for choice of time step  : Δt < h/c 
+ *  h = width of the cell (gridResolution), c = Constant c is the speed at which waves travel
  * 
  * DEMONSTRATION
     *  (Floating object, normals control) Rubber Ducky floating
@@ -83,6 +88,7 @@ public class FluidSimulation : MonoBehaviour
     private NativeArray<Vector3>    simVertices;
 
     private Mesh                    deformingMesh;
+    private Color[]                 colors = null;
 
     // temp
     public  BoxCollider             simCollider;
@@ -103,7 +109,7 @@ public class FluidSimulation : MonoBehaviour
     }
     private List<PhysicObject> physicObjects = new List<PhysicObject>();
 
-    public void Dispose()
+    public void OnDestroy()
     {
         if (simulation != null)
             { simulation.Dispose(); }
@@ -133,17 +139,23 @@ public class FluidSimulation : MonoBehaviour
             meshFilter = gameObject.AddComponent<MeshFilter>();
 
         // Create the mesh
-        deformingMesh = simData.CreateSurface(surfaceLimits, out simVertices);
+        deformingMesh = simData.CreateSurface(surfaceLimits, out simVertices);        
 
         // Adjust X side contours for adjusted planes
         if (surfaceType == SimSurfaceType.DetectPlane)
             AdjustXContour();
 
         // Computes UVs (they need to be done AFTER adjustment)
-        deformingMesh.uv = simData.ComputeUVs(simVertices);
+        deformingMesh.uv = simData.ComputeUVs(simVertices, SimDataQuad.TextureTilingType.Stretch);
 
         meshFilter.mesh = deformingMesh;
         meshFilter.transform.position = boundingBoxMin;
+
+        // colors
+        colors = new Color[simData.simSize];
+        for (int i = 0; i < colors.Length; i++)
+            colors[i] = new Color(0, 0, 1.0f);
+        deformingMesh.colors = colors;
 
         // Create collider
         simCollider = gameObject.AddComponent<BoxCollider>();

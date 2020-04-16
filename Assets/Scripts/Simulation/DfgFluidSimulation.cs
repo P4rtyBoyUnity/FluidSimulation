@@ -307,6 +307,7 @@ public class DfgSimulation : FluidSimulationInterface
         }
 
         m_Set.ReleaseGraphValue(gatherNodeGraphValue);
+        m_Set.Destroy(m_GatherNode);
         m_Set.Destroy(m_UniformNode);
         m_Set.Dispose();
     }
